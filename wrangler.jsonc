@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "jatevo-cloudflare-app",
+  "compatibility_date": "2026-05-20",
+  "main": "./worker/index.ts",
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dc-cooling-db",
+      "database_id": "1c445c87-7932-4012-b0c0-ac089c25ada9"
+    }
+  ]
+}
