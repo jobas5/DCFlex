@@ -87,6 +87,22 @@ No environment variables or secrets are required by default; the only runtime bi
 
 Optional Telegram alerts (guardrail violations, watchdog fail-safe, thermal-margin transitions, heat-forecast warnings) are sent from the cron tick when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set (locally in `.dev.vars`, in production via `wrangler secret put`). `DASHBOARD_URL` adds a link to each message. Alerts are edge-triggered and deduplicated via the `alert_events` table, so a sustained condition notifies once.
 
+## Authentication
+
+Single-account login (username + password) gates the whole app. Set three secrets (`.dev.vars` locally, `wrangler secret put` in production):
+
+- `AUTH_USERNAME` — the operator username (dev default: `admin`).
+- `AUTH_PASSWORD_HASH` — a PBKDF2-SHA256 hash in the form `pbkdf2:iterations:saltHex:hashHex`. Generate with (Web Crypto, same path the worker verifies with):
+  ```bash
+  node -e "const e=new TextEncoder();const H=x=>[...new Uint8Array(x)].map(b=>b.toString(16).padStart(2,'0')).join('');const F=h=>{const b=new Uint8Array(h.length/2);for(let i=0;i<b.length;i++)b[i]=parseInt(h.slice(i*2,i*2+2),16);return b};(async()=>{const s=crypto.getRandomValues(new Uint8Array(16));const k=await crypto.subtle.importKey('raw',e.encode('YOUR_PASSWORD'),'PBKDF2',false,['deriveBits']);const d=await crypto.subtle.deriveBits({name:'PBKDF2',salt:s,iterations:100000,hash:'SHA-256'},k,256);console.log('pbkdf2:100000:'+H(s.buffer)+':'+H(d))})()"
+  ```
+- `AUTH_SECRET` — random 32-byte hex used to sign the session cookie:
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  ```
+
+On login the worker sets an `HttpOnly` session cookie (`SameSite=Lax`, `Secure` in production) valid for 12 hours. All `/api/*` routes except `/api/auth/login`, `/api/auth/logout`, `/api/auth/me`, and `/api/health` require a valid session. If any of the three secrets is missing, login fails closed (no access).
+
 ## Build & deploy
 
 ```bash

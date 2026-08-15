@@ -162,6 +162,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
+  if (response.status === 401) {
+    window.dispatchEvent(new Event("dcflex:unauthorized"));
+  }
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
@@ -177,6 +180,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authLogin: (username: string, password: string) =>
+    request<{ ok: boolean }>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+  authLogout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST", body: "{}" }),
+  authMe: () => request<{ ok: boolean }>("/api/auth/me"),
   telemetryCurrent: () => request<TelemetryCurrentResponse>("/api/telemetry/current"),
   telemetryTick: () => request<TelemetryCurrentResponse>("/api/telemetry/tick", { method: "POST", body: "{}" }),
   telemetryHistory: (clusterId?: number, limit = 96) =>

@@ -6,6 +6,9 @@ export interface CloudflareDatabaseEnv {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
   DASHBOARD_URL?: string;
+  AUTH_USERNAME?: string;
+  AUTH_PASSWORD_HASH?: string;
+  AUTH_SECRET?: string;
 }
 
 // Production data access must go through the D1 binding; do not persist app data on disk.

@@ -22,6 +22,17 @@ import {
   predict,
 } from "../src/lib/twin/surrogate";
 import { proposeTransfer, type TransferContext } from "../src/lib/twin/transfer";
+import {
+  clearSessionCookieHeader,
+  clientIp,
+  createSession,
+  delay,
+  getSessionToken,
+  loginRateLimited,
+  readSession,
+  sessionCookieHeader,
+  verifyPassword,
+} from "./auth";
 import { evaluateAlerts } from "./telegram";
 import {
   FACTORY_SETPOINTS,
@@ -43,10 +54,10 @@ type Env = CloudflareDatabaseEnv;
 const WATCHDOG_TIMEOUT_SEC = 90;
 
 const DEFAULT_ZONES = [
-  { id: 1, name: "Zone A", baseLoadMw: 5.5, loadAmpMw: 2.0, loadPhaseH: 9, wetBulbOffsetC: 0 },
-  { id: 2, name: "Zone B", baseLoadMw: 4.0, loadAmpMw: 1.5, loadPhaseH: 13, wetBulbOffsetC: 1 },
-  { id: 3, name: "Zone C", baseLoadMw: 3.0, loadAmpMw: 1.0, loadPhaseH: 17, wetBulbOffsetC: 2 },
-  { id: 4, name: "Zone D", baseLoadMw: 2.5, loadAmpMw: 0.8, loadPhaseH: 21, wetBulbOffsetC: -1 },
+  { id: 1, name: "Zone A", baseLoadMw: 5.5, loadAmpMw: 2.0, loadPhaseH: 9, wetBulbOffsetC: 0, targetPue: 1.11, targetWue: 0.115, waterBudgetLpm: 1400, powerBudgetMw: 1.2 },
+  { id: 2, name: "Zone B", baseLoadMw: 4.0, loadAmpMw: 1.5, loadPhaseH: 13, wetBulbOffsetC: 1, targetPue: 1.12, targetWue: 0.12, waterBudgetLpm: 1100, powerBudgetMw: 0.95 },
+  { id: 3, name: "Zone C", baseLoadMw: 3.0, loadAmpMw: 1.0, loadPhaseH: 17, wetBulbOffsetC: 2, targetPue: 1.13, targetWue: 0.125, waterBudgetLpm: 900, powerBudgetMw: 0.75 },
+  { id: 4, name: "Zone D", baseLoadMw: 2.5, loadAmpMw: 0.8, loadPhaseH: 21, wetBulbOffsetC: -1, targetPue: 1.135, targetWue: 0.13, waterBudgetLpm: 750, powerBudgetMw: 0.6 },
 ];
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
@@ -89,6 +100,10 @@ async function listZones(env: Env) {
         loadAmpMw: z.loadAmpMw,
         loadPhaseH: z.loadPhaseH,
         wetBulbOffsetC: z.wetBulbOffsetC,
+        targetPue: z.targetPue,
+        targetWue: z.targetWue,
+        waterBudgetLpm: z.waterBudgetLpm,
+        powerBudgetMw: z.powerBudgetMw,
         currentSetpoints: JSON.stringify(FACTORY_SETPOINTS),
       });
     }
@@ -100,7 +115,7 @@ async function getFacility(env: Env) {
   const db = getDb(env);
   const rows = await db.select().from(facilityConfig).where(eq(facilityConfig.id, 1));
   if (rows.length) return rows[0];
-  await db.insert(facilityConfig).values({ id: 1 });
+  await db.insert(facilityConfig).values({ id: 1, totalWaterBudgetLpm: 4400, totalPowerBudgetMw: 3.6 });
   const created = await db.select().from(facilityConfig).where(eq(facilityConfig.id, 1));
   return created[0];
 }
@@ -396,6 +411,44 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (path === "/api/health" && method === "GET") {
     return json({ ok: true, service: "dcflex" });
+  }
+
+  // --- Auth ----------------------------------------------------------------
+  if (path === "/api/auth/login" && method === "POST") {
+    const ip = clientIp(request);
+    if (loginRateLimited(ip)) {
+      await delay(500);
+      return json({ error: "Too many attempts. Try again in a minute." }, 429);
+    }
+    const body = await readBody<{ username?: string; password?: string }>(request);
+    if (!body || typeof body.username !== "string" || typeof body.password !== "string") {
+      return json({ error: "Username and password are required." }, 400);
+    }
+    const okUser = env.AUTH_USERNAME ? body.username === env.AUTH_USERNAME : false;
+    const okPass = await verifyPassword(env, body.password);
+    if (!okUser || !okPass) {
+      await delay(400);
+      return json({ error: "Invalid username or password." }, 401);
+    }
+    const token = await createSession(env);
+    if (!token) return json({ error: "Auth is not configured." }, 500);
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json", "set-cookie": sessionCookieHeader(token, request) },
+    });
+  }
+
+  if (path === "/api/auth/logout" && method === "POST") {
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json", "set-cookie": clearSessionCookieHeader() },
+    });
+  }
+
+  if (path === "/api/auth/me" && method === "GET") {
+    const token = getSessionToken(request);
+    if (token && (await readSession(env, token))) return json({ ok: true });
+    return json({ error: "Unauthorized." }, 401);
   }
 
   // --- Telemetry -----------------------------------------------------------
@@ -920,18 +973,28 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const t = rows[0];
 
     if (action === "apply") {
-      await db
-        .update(zones)
-        .set({ currentSetpoints: t.targetSetpoints, updatedAt: new Date().toISOString() })
-        .where(eq(zones.id, t.targetId));
-      await db
-        .update(zones)
-        .set({ currentSetpoints: t.sourceSetpoints, updatedAt: new Date().toISOString() })
-        .where(eq(zones.id, t.sourceId));
       const allZones = await listZones(env);
       const target = allZones.find((z) => z.id === t.targetId);
       const source = allZones.find((z) => z.id === t.sourceId);
       if (target && source) {
+        await db
+          .update(zones)
+          .set({
+            currentSetpoints: t.targetSetpoints,
+            waterBudgetLpm: round(Math.max(0, target.waterBudgetLpm + t.waterDeltaLpm), 1),
+            powerBudgetMw: round(Math.max(0, target.powerBudgetMw + t.powerDeltaMw), 3),
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(zones.id, t.targetId));
+        await db
+          .update(zones)
+          .set({
+            currentSetpoints: t.sourceSetpoints,
+            waterBudgetLpm: round(Math.max(0, source.waterBudgetLpm - t.waterDeltaLpm), 1),
+            powerBudgetMw: round(Math.max(0, source.powerBudgetMw - t.powerDeltaMw), 3),
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(zones.id, t.sourceId));
         await db.insert(controlActions).values({
           clusterId: target.id,
           mode: target.mode,
@@ -1003,6 +1066,19 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
+      const path = url.pathname;
+      const method = request.method;
+      const isPublic =
+        (path === "/api/health" && method === "GET") ||
+        path === "/api/auth/login" ||
+        path === "/api/auth/logout" ||
+        path === "/api/auth/me";
+      if (!isPublic) {
+        const token = getSessionToken(request);
+        if (!token || !(await readSession(env, token))) {
+          return json({ error: "Unauthorized." }, 401);
+        }
+      }
       try {
         return await handleApi(request, env);
       } catch (err) {
