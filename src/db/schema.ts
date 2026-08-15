@@ -108,6 +108,13 @@ export const shadowSamples = sqliteTable("shadow_samples", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const alertEvents = sqliteTable("alert_events", {
+  alertKey: text("alert_key").primaryKey(),
+  state: text("state").notNull(),
+  lastTick: int("last_tick").notNull(),
+  lastSentAt: text("last_sent_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const modelMetrics = sqliteTable("model_metrics", {
   id: int("id").primaryKey({ autoIncrement: true }),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),

@@ -22,6 +22,7 @@ import {
   predict,
 } from "../src/lib/twin/surrogate";
 import { proposeTransfer, type TransferContext } from "../src/lib/twin/transfer";
+import { evaluateAlerts } from "./telegram";
 import {
   FACTORY_SETPOINTS,
   SLEW_LIMITS,
@@ -251,29 +252,39 @@ function toCtx(zone: ZoneRow, telemetry: Telemetry): TransferContext {
   };
 }
 
+async function detectFailSafe(
+  env: Env,
+  zone: ZoneRow,
+  now: Date,
+): Promise<{ failSafe: boolean; heartbeatAgeSec: number | null }> {
+  const db = getDb(env);
+  const heartbeatAgeSec = zone.lastHeartbeat
+    ? Math.floor((now.getTime() - new Date(zone.lastHeartbeat).getTime()) / 1000)
+    : null;
+  const failSafe = heartbeatAgeSec !== null && heartbeatAgeSec > WATCHDOG_TIMEOUT_SEC;
+  if (failSafe && zone.failSafeActive !== 1) {
+    await db
+      .update(zones)
+      .set({ failSafeActive: 1, commsOk: 0, updatedAt: now.toISOString() })
+      .where(eq(zones.id, zone.id));
+    await db.insert(controlActions).values({
+      clusterId: zone.id,
+      mode: zone.mode,
+      kind: "fail_safe",
+      setpoints: JSON.stringify(FACTORY_SETPOINTS),
+      note: `Watchdog: heartbeat lost >${WATCHDOG_TIMEOUT_SEC}s — reverted to factory setpoints`,
+    });
+  }
+  return { failSafe, heartbeatAgeSec };
+}
+
 async function controlSnapshot(env: Env) {
   const db = getDb(env);
   const now = new Date();
   const allZones = await listZones(env);
   const states = await Promise.all(
     allZones.map(async (z) => {
-      const heartbeatAgeSec = z.lastHeartbeat
-        ? Math.floor((now.getTime() - new Date(z.lastHeartbeat).getTime()) / 1000)
-        : null;
-      const failSafe = heartbeatAgeSec !== null && heartbeatAgeSec > WATCHDOG_TIMEOUT_SEC;
-      if (failSafe && z.failSafeActive !== 1) {
-        await db
-          .update(zones)
-          .set({ failSafeActive: 1, commsOk: 0, updatedAt: now.toISOString() })
-          .where(eq(zones.id, z.id));
-        await db.insert(controlActions).values({
-          clusterId: z.id,
-          mode: z.mode,
-          kind: "fail_safe",
-          setpoints: JSON.stringify(FACTORY_SETPOINTS),
-          note: `Watchdog: heartbeat lost >${WATCHDOG_TIMEOUT_SEC}s — reverted to factory setpoints`,
-        });
-      }
+      const { failSafe, heartbeatAgeSec } = await detectFailSafe(env, z, now);
       const current = parseSetpoints(z.currentSetpoints);
       return {
         id: z.id,
@@ -338,9 +349,13 @@ async function advanceSimulation(env: Env) {
   const db = getDb(env);
   const allZones = await listZones(env);
   const nextTick = (await getMaxTick(env)) + 1;
-  const now = new Date().toISOString();
+  const now = new Date();
+  const nowIso = now.toISOString();
   const views: ZoneView[] = [];
+  const failSafe: Record<number, boolean> = {};
   for (const z of allZones) {
+    const fs = await detectFailSafe(env, z, now);
+    failSafe[z.id] = fs.failSafe;
     const prev = await latestTelemetryForZone(env, z);
     const steered = await steerZone(env, z, prev);
     const { telemetry } = tickTelemetry(prev, nextTick, steered, zoneSpec(z));
@@ -357,10 +372,11 @@ async function advanceSimulation(env: Env) {
     }
     views.push(buildZoneView(z, telemetry, steered));
   }
+  await evaluateAlerts(env, nextTick, views, failSafe, WATCHDOG_TIMEOUT_SEC);
   // Feed the watchdog so it doesn't fail-safe while idle.
   await db
     .update(zones)
-    .set({ lastHeartbeat: now, commsOk: 1, failSafeActive: 0 })
+    .set({ lastHeartbeat: nowIso, commsOk: 1, failSafeActive: 0 })
     .where(eq(zones.id, zones.id));
   await db
     .delete(telemetrySamples)
@@ -410,7 +426,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       return json({
         history: rows.reverse().map((r) => {
           const p = JSON.parse(r.payload) as Telemetry;
-          return { tick: r.tick, timestamp: p.timestamp, pue: r.pue, wue: r.wue, gpuDieC: p.gpuDieC, cpuDieC: p.cpuDieC };
+          return {
+            tick: r.tick,
+            timestamp: p.timestamp,
+            pue: r.pue,
+            wue: r.wue,
+            gpuDieC: p.gpuDieC,
+            cpuDieC: p.cpuDieC,
+            itLoadMw: p.itLoadMw,
+            accessoryPowerMw: round(p.itLoadMw * (r.pue - 1), 3),
+          };
         }),
       });
     }
@@ -420,11 +445,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       .from(telemetrySamples)
       .orderBy(desc(telemetrySamples.tick))
       .limit(limit * 4);
-    const byTick = new Map<number, { itLoad: number; pueSum: number; wueSum: number; maxGpu: number; maxCpu: number; ts: string }>();
+    const byTick = new Map<number, { itLoad: number; accessory: number; pueSum: number; wueSum: number; maxGpu: number; maxCpu: number; ts: string }>();
     for (const r of rows) {
       const p = JSON.parse(r.payload) as Telemetry;
-      const g = byTick.get(r.tick) ?? { itLoad: 0, pueSum: 0, wueSum: 0, maxGpu: 0, maxCpu: 0, ts: p.timestamp };
+      const g = byTick.get(r.tick) ?? { itLoad: 0, accessory: 0, pueSum: 0, wueSum: 0, maxGpu: 0, maxCpu: 0, ts: p.timestamp };
       g.itLoad += p.itLoadMw;
+      g.accessory += p.itLoadMw * (r.pue - 1);
       g.pueSum += r.pue * p.itLoadMw;
       g.wueSum += r.wue * p.itLoadMw;
       g.maxGpu = Math.max(g.maxGpu, p.gpuDieC);
@@ -435,7 +461,16 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       .sort((a, b) => a - b)
       .map((t) => {
         const g = byTick.get(t)!;
-        return { tick: t, timestamp: g.ts, pue: g.pueSum / g.itLoad, wue: g.wueSum / g.itLoad, gpuDieC: g.maxGpu, cpuDieC: g.maxCpu };
+        return {
+          tick: t,
+          timestamp: g.ts,
+          pue: g.pueSum / g.itLoad,
+          wue: g.wueSum / g.itLoad,
+          gpuDieC: g.maxGpu,
+          cpuDieC: g.maxCpu,
+          itLoadMw: round(g.itLoad, 2),
+          accessoryPowerMw: round(g.accessory, 3),
+        };
       });
     return json({ history });
   }

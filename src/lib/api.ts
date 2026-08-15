@@ -19,6 +19,8 @@ export interface HistoryPoint {
   wue: number;
   gpuDieC: number;
   cpuDieC: number;
+  itLoadMw: number;
+  accessoryPowerMw: number;
 }
 
 export interface WhatIfResponse {

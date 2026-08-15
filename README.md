@@ -83,7 +83,9 @@ Worker configuration lives in **`wrangler.jsonc`** (not `wrangler.toml`):
 - `assets`: static frontend from `dist/client`, with single-page-application fallback (`not_found_handling`) and `run_worker_first` for `/api/*`
 - `d1_databases`: the `DB` binding → D1 database `dc-cooling-db`
 
-No environment variables or secrets are used by the app code; the only runtime binding is the `DB` D1 database, accessed through `getDb(env)` in `src/db/client.ts`. Drizzle Kit reads `drizzle.config.ts` for migration generation.
+No environment variables or secrets are required by default; the only runtime binding is the `DB` D1 database, accessed through `getDb(env)` in `src/db/client.ts`. Drizzle Kit reads `drizzle.config.ts` for migration generation.
+
+Optional Telegram alerts (guardrail violations, watchdog fail-safe, thermal-margin transitions, heat-forecast warnings) are sent from the cron tick when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set (locally in `.dev.vars`, in production via `wrangler secret put`). `DASHBOARD_URL` adds a link to each message. Alerts are edge-triggered and deduplicated via the `alert_events` table, so a sustained condition notifies once.
 
 ## Build & deploy
 
