@@ -1,7 +1,6 @@
 import { createRootRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
   Activity,
-  BookOpen,
   BrainCircuit,
   FlaskConical,
   Gauge as GaugeIcon,
@@ -14,7 +13,6 @@ const NAV = [
   { to: "/whatif", label: "What-If Engine", icon: FlaskConical },
   { to: "/control", label: "Control Loop", icon: Activity },
   { to: "/model", label: "Surrogate Model", icon: BrainCircuit },
-  { to: "/docs", label: "Docs", icon: BookOpen },
 ] as const;
 
 function NavItems({ onNavigate }: { onNavigate?: () => void }) {
