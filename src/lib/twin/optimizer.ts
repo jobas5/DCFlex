@@ -60,6 +60,7 @@ export function runWhatIf(request: WhatIfRequest): WhatIfResult {
           chipTempC: p.chipTempC,
           deltaPKpa: p.deltaPKpa,
           flowLpm: p.flowLpm,
+          accessoryPowerMw: p.accessoryPowerMw,
           feasible: g.feasible,
           violations: g.violations,
         });

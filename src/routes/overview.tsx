@@ -1,4 +1,4 @@
-import { createRoute } from "@tanstack/react-router";
+import { createRoute, Link } from "@tanstack/react-router";
 import {
   AlertTriangle,
   Cpu,
@@ -12,32 +12,294 @@ import {
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LineChart } from "../components/LineChart";
 import { useToast } from "../components/Toast";
 import { ErrorState, KpiCard, Panel, StatusBadge } from "../components/ui";
-import { api, type HistoryPoint, type TickResponse } from "../lib/api";
-import { GUARDRAILS } from "../lib/twin/types";
+import { api, type TickResponse } from "../lib/api";
+import { GUARDRAILS, type FacilityView, type ZoneView } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
-const fmtTime = (iso: string) =>
-  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const zoneCardStyle: Record<ZoneView["status"], string> = {
+  green: "border-emerald-500/50 hover:bg-emerald-500/10",
+  yellow: "border-amber-500/50 hover:bg-amber-500/10",
+  red: "border-red-500/60 hover:bg-red-500/10",
+};
+const dotStyle: Record<ZoneView["status"], string> = {
+  green: "bg-emerald-400",
+  yellow: "bg-amber-400",
+  red: "bg-red-500",
+};
+
+const statusTone: Record<ZoneView["status"], "good" | "warn" | "bad"> = {
+  green: "good",
+  yellow: "warn",
+  red: "bad",
+};
+
+function SummaryCard({ aggregate }: { aggregate: FacilityView }) {
+  const { budgets, budgetUsage } = aggregate;
+  return (
+    <div className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">Facility Overview</h1>
+          <p className="text-sm text-slate-400">
+            Live digital twin · 4 cooling zones · {aggregate.itLoadMw.toFixed(2)} MW total IT load
+          </p>
+        </div>
+        <StatusBadge tone={aggregate.status === "red" ? "bad" : aggregate.status === "yellow" ? "warn" : "good"}>
+          {aggregate.status === "red"
+            ? "Cooling needed"
+            : aggregate.status === "yellow"
+              ? "Watch"
+              : "Within limits"}
+        </StatusBadge>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <SummaryStat label="PUE" value={aggregate.pue.toFixed(4)} />
+        <SummaryStat label="WUE" value={aggregate.wue.toFixed(3)} unit="L/kWh" />
+        <SummaryStat label="Accessory power" value={aggregate.accessoryPowerMw.toFixed(3)} unit="MW" />
+        <SummaryStat label="Thermal margin" value={aggregate.margin.toFixed(1)} unit="°C" />
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <BudgetBar
+          label="Water budget"
+          used={`${aggregate.waterLpm} L/min`}
+          cap={`${budgets.waterLpm} L/min`}
+          pct={budgetUsage.waterPct}
+        />
+        <BudgetBar
+          label="Power budget"
+          used={`${aggregate.accessoryPowerMw.toFixed(2)} MW`}
+          cap={`${budgets.powerMw} MW`}
+          pct={budgetUsage.powerPct}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SummaryStat({ label, value, unit }: { label: string; value: string; unit?: string }) {
+  return (
+    <div>
+      <p className="text-xs font-medium uppercase tracking-wider text-slate-400">{label}</p>
+      <p className="mt-1 font-mono text-lg font-semibold tabular-nums">
+        {value}
+        {unit ? <span className="ml-1 text-sm font-normal text-slate-400">{unit}</span> : null}
+      </p>
+    </div>
+  );
+}
+
+function BudgetBar({ label, used, cap, pct }: { label: string; used: string; cap: string; pct: number }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs text-slate-400">
+        <span>{label}</span>
+        <span className="font-mono">
+          {used} / {cap}
+        </span>
+      </div>
+      <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+        <div
+          className={`h-full rounded-full ${pct > 100 ? "bg-red-500" : pct > 80 ? "bg-amber-400" : "bg-cyan-500"}`}
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ZoneCard({
+  zone,
+  selected,
+  onClick,
+}: {
+  zone: ZoneView;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-cyan-400 ${
+        selected ? "ring-2 ring-cyan-400/60" : ""
+      } ${zoneCardStyle[zone.status]}`}
+    >
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-2 text-sm font-medium">
+          <span className={`h-2.5 w-2.5 rounded-full ${dotStyle[zone.status]}`} aria-hidden />
+          {zone.name}
+        </span>
+        <span className="font-mono text-xs text-slate-400">
+          {zone.prediction.chipTempC.toFixed(1)}°C
+        </span>
+      </div>
+      <p className="mt-1 font-mono text-xs text-slate-400">
+        margin {zone.margin.toFixed(1)}°C · PUE {zone.prediction.pue.toFixed(3)}
+      </p>
+    </button>
+  );
+}
+
+function FacilityDetail({ aggregate, zones }: { aggregate: FacilityView; zones: ZoneView[] }) {
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <KpiCard label="IT Load" value={aggregate.itLoadMw.toFixed(2)} unit="MW" icon={Cpu} tone="default" />
+        <KpiCard
+          label="PUE"
+          value={aggregate.pue.toFixed(4)}
+          icon={Zap}
+          tone={aggregate.pue < 1.12 ? "good" : "warn"}
+          hint="Target < 1.12"
+        />
+        <KpiCard label="WUE" value={aggregate.wue.toFixed(3)} unit="L/kWh" icon={Droplets} tone="default" />
+        <KpiCard
+          label="Accessory Power"
+          value={aggregate.accessoryPowerMw.toFixed(3)}
+          unit="MW"
+          icon={GaugeIcon}
+          tone="default"
+        />
+        <KpiCard
+          label="Thermal Margin"
+          value={aggregate.margin.toFixed(1)}
+          unit="°C"
+          icon={aggregate.margin < 5 ? AlertTriangle : Thermometer}
+          tone={aggregate.margin < 3 ? "bad" : aggregate.margin < 5 ? "warn" : "good"}
+        />
+      </div>
+      <Panel title="Zone status">
+        <ul className="divide-y divide-slate-800">
+          {zones.map((z) => (
+            <li key={z.id} className="flex items-center justify-between py-2 text-sm">
+              <span className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${dotStyle[z.status]}`} aria-hidden />
+                {z.name}
+              </span>
+              <span className="font-mono text-xs text-slate-400">
+                {z.prediction.chipTempC.toFixed(1)}°C · margin {z.margin.toFixed(1)}°C
+              </span>
+            </li>
+          ))}
+        </ul>
+      </Panel>
+    </div>
+  );
+}
+
+function ZoneDetail({ zone }: { zone: ZoneView }) {
+  const pueGap = zone.prediction.pue - zone.targets.pue;
+  const wueGap = zone.prediction.wue - zone.targets.wue;
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <KpiCard label="PUE" value={zone.prediction.pue.toFixed(4)} icon={Zap} tone={pueGap <= 0 ? "good" : "warn"} hint={`Target ${zone.targets.pue.toFixed(3)}`} />
+        <KpiCard label="WUE" value={zone.prediction.wue.toFixed(3)} unit="L/kWh" icon={Droplets} tone={wueGap <= 0 ? "good" : "warn"} hint={`Target ${zone.targets.wue.toFixed(3)}`} />
+        <KpiCard label="IT Load" value={zone.telemetry.itLoadMw.toFixed(2)} unit="MW" icon={Cpu} tone="default" />
+        <KpiCard label="Accessory Power" value={zone.prediction.accessoryPowerMw.toFixed(3)} unit="MW" icon={GaugeIcon} tone="default" hint={`Pump ${zone.prediction.pumpPowerMw.toFixed(2)} + chiller ${zone.prediction.chillerPowerMw.toFixed(2)} MW`} />
+        <KpiCard
+          label="Thermal Margin"
+          value={zone.margin.toFixed(1)}
+          unit="°C"
+          icon={zone.margin < 5 ? AlertTriangle : Thermometer}
+          tone={zone.status === "red" ? "bad" : zone.status === "yellow" ? "warn" : "good"}
+          hint="Headroom to 85°C"
+        />
+        <KpiCard label="Chip temp" value={zone.prediction.chipTempC.toFixed(1)} unit="°C" icon={Thermometer} tone={statusTone[zone.status]} />
+      </div>
+
+      <Panel title="Loop & setpoints">
+        <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
+          <LoopStat label="Supply" value={`${zone.telemetry.cduSupplyC.toFixed(1)}°C`} />
+          <LoopStat label="Return" value={`${zone.telemetry.cduReturnC.toFixed(1)}°C`} />
+          <LoopStat
+            label="ΔP"
+            value={`${zone.prediction.deltaPKpa.toFixed(0)} kPa`}
+            ok={zone.prediction.deltaPKpa >= GUARDRAILS.deltaPMinKpa && zone.prediction.deltaPKpa <= GUARDRAILS.deltaPMaxKpa}
+          />
+          <LoopStat
+            label="Flow"
+            value={`${zone.prediction.flowLpm} L/min`}
+            ok={zone.prediction.flowLpm >= GUARDRAILS.flowMinLpm && zone.prediction.flowLpm <= GUARDRAILS.flowMaxLpm}
+          />
+          <LoopStat label="Wet-bulb" value={`${zone.telemetry.wetBulbC.toFixed(1)}°C`} icon={<Waves className="h-3.5 w-3.5" aria-hidden />} />
+          <LoopStat label="Dry-bulb" value={`${zone.telemetry.dryBulbC.toFixed(1)}°C`} icon={<Wind className="h-3.5 w-3.5" aria-hidden />} />
+        </dl>
+        <p className="mt-3 text-xs text-slate-400">
+          Setpoints: supply {zone.setpoints.coolantSupplyC}°C · pump {zone.setpoints.pumpSpeedPct}% · valve{" "}
+          {zone.setpoints.valvePosPct}% · CDU {zone.setpoints.cduSetpointC}°C
+        </p>
+      </Panel>
+
+      <Panel title="Targets & budgets">
+        <div className="grid grid-cols-2 gap-3">
+          <TargetStat label="PUE target" value={zone.prediction.pue.toFixed(4)} target={zone.targets.pue.toFixed(3)} over={pueGap > 0} />
+          <TargetStat label="WUE target" value={zone.prediction.wue.toFixed(3)} target={zone.targets.wue.toFixed(3)} over={wueGap > 0} />
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <BudgetBar label="Water" used={`${zone.prediction.flowLpm} L/min`} cap={`${zone.budgets.waterLpm} L/min`} pct={zone.budgetUsage.waterPct} />
+          <BudgetBar label="Power" used={`${zone.prediction.accessoryPowerMw.toFixed(2)} MW`} cap={`${zone.budgets.powerMw} MW`} pct={zone.budgetUsage.powerPct} />
+        </div>
+        {!zone.guardrails.feasible ? (
+          <p className="mt-3 text-xs text-red-300">Guardrail violations: {zone.guardrails.violations.map((v) => v.message).join("; ")}</p>
+        ) : null}
+      </Panel>
+
+      {zone.status === "red" ? (
+        <div className="rounded-lg border border-red-500/40 bg-red-950/20 p-3 text-sm">
+          <p className="font-medium text-red-300">{zone.name} needs more cooling.</p>
+          <Link to="/control" className="mt-1 inline-block text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400">
+            Open Control to transfer cooling to this zone →
+          </Link>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TargetStat({ label, value, target, over }: { label: string; value: string; target: string; over: boolean }) {
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
+      <p className="text-xs text-slate-400">{label}</p>
+      <p className="mt-0.5 font-mono text-base tabular-nums">
+        {value}
+        <span className="ml-1.5 text-xs text-slate-500">/ {target}</span>
+      </p>
+      <p className={`text-xs ${over ? "text-amber-300" : "text-emerald-300"}`}>{over ? "over target" : "within target"}</p>
+    </div>
+  );
+}
+
+function LoopStat({ label, value, ok, icon }: { label: string; value: string; ok?: boolean; icon?: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
+      <dt className="flex items-center gap-1.5 text-xs text-slate-400">
+        {icon}
+        {label}
+      </dt>
+      <dd className={`mt-0.5 font-mono text-base tabular-nums ${ok === undefined ? "text-slate-100" : ok ? "text-emerald-300" : "text-red-300"}`}>
+        {value}
+        {ok !== undefined ? <span className="ml-1.5 text-xs">{ok ? "in bounds" : "OUT"}</span> : null}
+      </dd>
+    </div>
+  );
+}
 
 function OverviewPage() {
   const toast = useToast();
   const [latest, setLatest] = useState<TickResponse | null>(null);
-  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
-  const [qualityTotals, setQualityTotals] = useState({ outliers: 0, drift: 0, imputed: 0 });
-  const [driftFlags, setDriftFlags] = useState<string[]>([]);
+  const [selectedId, setSelectedId] = useState<number | "facility">("facility");
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
   const load = useCallback(async () => {
     try {
-      const [current, hist] = await Promise.all([api.telemetryCurrent(), api.telemetryHistory(48)]);
-      setLatest({ ...current, quality: { outliersRemoved: 0, driftFlags: [], imputedCount: 0 } });
-      setHistory(hist.history);
+      setLatest({ ...(await api.telemetryCurrent()), quality: { outliersRemoved: 0, driftFlags: [], imputedCount: 0 } });
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load telemetry.");
@@ -54,17 +316,7 @@ function OverviewPage() {
       try {
         const tick = await api.telemetryTick();
         setLatest(tick);
-        setHistory((prev) => {
-          const point: HistoryPoint = { ...tick.telemetry, pue: tick.prediction.pue, wue: tick.prediction.wue };
-          return [...prev.slice(-47), point];
-        });
-        setQualityTotals((q) => ({
-          outliers: q.outliers + tick.quality.outliersRemoved,
-          drift: q.drift + tick.quality.driftFlags.length,
-          imputed: q.imputed + tick.quality.imputedCount,
-        }));
         if (tick.quality.driftFlags.length) {
-          setDriftFlags((f) => [...f.slice(-4), ...tick.quality.driftFlags]);
           toast(`Sensor drift detected: ${tick.quality.driftFlags[0]}`, "warning");
         }
         setError(null);
@@ -75,162 +327,67 @@ function OverviewPage() {
     return () => clearInterval(id);
   }, [toast]);
 
-  if (error && !latest) {
-    return <ErrorState message={error} onRetry={() => void load()} />;
-  }
-  if (!latest) {
-    return <p className="py-20 text-center text-sm text-slate-400">Connecting to digital twin…</p>;
-  }
+  if (error && !latest) return <ErrorState message={error} onRetry={() => void load()} />;
+  if (!latest) return <p className="py-20 text-center text-sm text-slate-400">Connecting to digital twin…</p>;
 
-  const { telemetry: t, prediction: p, setpoints } = latest;
-  const margin = p.thermalMarginC;
-  const marginTone = margin < 3 ? "bad" : margin < 5 ? "warn" : "good";
-  const labels = history.map((h) => fmtTime(h.timestamp));
+  const { aggregate, zones } = latest;
+  const selected = selectedId === "facility" ? null : zones.find((z) => z.id === selectedId) ?? null;
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Facility Overview</h1>
-          <p className="text-sm text-slate-400">
-            Live digital twin · 10-min aggregation intervals · tick #{t.tick}
-          </p>
-        </div>
+        <SummaryCard aggregate={aggregate} />
+      </div>
+      {error ? (
+        <p className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-sm text-amber-300" role="alert">
+          Stream interrupted: {error} — retrying automatically.
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <button
           type="button"
           onClick={() => setPaused((v) => !v)}
           aria-pressed={paused}
-          className="inline-flex items-center gap-2 rounded-lg border border-cyan-500/50 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
+          className="inline-flex items-center gap-2 rounded-lg border border-cyan-500/50 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 focus-visible:outline-2 focus-visible:outline-cyan-400"
         >
           {paused ? <Play className="h-4 w-4" aria-hidden /> : <Pause className="h-4 w-4" aria-hidden />}
           {paused ? "Resume stream" : "Pause stream"}
         </button>
       </div>
 
-      {error ? (
-        <p className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-sm text-amber-300" role="alert">
-          Stream interrupted: {error} — retrying automatically.
-        </p>
-      ) : null}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
+        <aside className="space-y-2" aria-label="Cooling zones">
+          <button
+            type="button"
+            onClick={() => setSelectedId("facility")}
+            aria-pressed={selectedId === "facility"}
+            className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-cyan-400 ${
+              selectedId === "facility" ? "ring-2 ring-cyan-400/60 border-cyan-500/50 bg-cyan-500/10" : "border-slate-700 hover:bg-slate-800"
+            }`}
+          >
+            <span className="flex items-center justify-between text-sm font-medium">
+              <span className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full bg-cyan-400" aria-hidden />
+                Facility (all zones)
+              </span>
+            </span>
+            <span className="mt-1 block font-mono text-xs text-slate-400">
+              PUE {aggregate.pue.toFixed(3)} · {aggregate.itLoadMw.toFixed(1)} MW
+            </span>
+          </button>
+          {zones.map((z) => (
+            <ZoneCard key={z.id} zone={z} selected={selectedId === z.id} onClick={() => setSelectedId(z.id)} />
+          ))}
+        </aside>
 
-      <div aria-live="polite" className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <KpiCard label="PUE" value={p.pue.toFixed(4)} icon={Zap} tone={p.pue < 1.12 ? "good" : "warn"} hint="Target < 1.12" />
-        <KpiCard label="WUE" value={p.wue.toFixed(3)} unit="L/kWh" icon={Droplets} tone="default" hint="Site water intensity" />
-        <KpiCard label="IT Load" value={t.itLoadMw.toFixed(2)} unit="MW" icon={Cpu} tone="default" hint={`Wet-bulb ${t.wetBulbC.toFixed(1)}°C`} />
-        <KpiCard label="Accessory Power" value={p.accessoryPowerMw.toFixed(3)} unit="MW" icon={GaugeIcon} tone="default" hint={`Pump ${p.pumpPowerMw.toFixed(3)} + chiller ${p.chillerPowerMw.toFixed(3)} MW`} />
-        <KpiCard
-          label="Thermal Margin"
-          value={margin.toFixed(1)}
-          unit="°C"
-          icon={margin < 5 ? AlertTriangle : Thermometer}
-          tone={marginTone}
-          hint={margin < 5 ? "Approaching 85°C die limit" : "Headroom to 85°C die limit"}
-        />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Panel title="PUE & WUE — last intervals">
-          {history.length > 2 ? (
-            <LineChart
-              ariaLabel="PUE and WUE trend over recent intervals"
-              labels={labels}
-              series={[
-                { label: "PUE", color: "#22d3ee", values: history.map((h) => h.pue) },
-                { label: "WUE (L/kWh)", color: "#34d399", values: history.map((h) => h.wue) },
-              ]}
-              yFormat={(v) => v.toFixed(2)}
-            />
+        <section aria-label="Detail">
+          {selected ? (
+            <ZoneDetail zone={selected} />
           ) : (
-            <p className="text-sm text-slate-400">Collecting history…</p>
+            <FacilityDetail aggregate={aggregate} zones={zones} />
           )}
-        </Panel>
-        <Panel title="Die temperatures vs limit">
-          {history.length > 2 ? (
-            <LineChart
-              ariaLabel="CPU and GPU die temperatures against the 85 degree limit"
-              labels={labels}
-              series={[
-                { label: "GPU die", color: "#f472b6", values: history.map((h) => h.gpuDieC) },
-                { label: "CPU die", color: "#a78bfa", values: history.map((h) => h.cpuDieC) },
-              ]}
-              yFormat={(v) => `${v.toFixed(0)}°C`}
-              threshold={{ value: GUARDRAILS.chipTempMaxC, label: "85°C limit", color: "#f87171" }}
-            />
-          ) : (
-            <p className="text-sm text-slate-400">Collecting history…</p>
-          )}
-        </Panel>
+        </section>
       </div>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Panel title="CDU secondary loop (TCS)">
-          <dl className="grid grid-cols-2 gap-3 text-sm">
-            <LoopStat label="Supply" value={`${t.cduSupplyC.toFixed(1)}°C`} />
-            <LoopStat label="Return" value={`${t.cduReturnC.toFixed(1)}°C`} />
-            <LoopStat
-              label="ΔP"
-              value={`${t.deltaPKpa.toFixed(0)} kPa`}
-              ok={t.deltaPKpa >= GUARDRAILS.deltaPMinKpa && t.deltaPKpa <= GUARDRAILS.deltaPMaxKpa}
-            />
-            <LoopStat
-              label="Flow"
-              value={`${t.flowLpm} L/min`}
-              ok={t.flowLpm >= GUARDRAILS.flowMinLpm && t.flowLpm <= GUARDRAILS.flowMaxLpm}
-            />
-          </dl>
-          <p className="mt-3 text-xs text-slate-400">
-            Loop ΔT {(t.cduReturnC - t.cduSupplyC).toFixed(1)}°C · active setpoints: supply{" "}
-            {setpoints.coolantSupplyC}°C, pump {setpoints.pumpSpeedPct}%, valve {setpoints.valvePosPct}%
-          </p>
-        </Panel>
-        <Panel title="Facility water (FWS) & ambient">
-          <dl className="grid grid-cols-2 gap-3 text-sm">
-            <LoopStat label="FWS supply" value={`${t.fwsSupplyC.toFixed(1)}°C`} icon={<Waves className="h-3.5 w-3.5" aria-hidden />} />
-            <LoopStat label="FWS flow" value={`${t.fwsFlowLpm} L/min`} />
-            <LoopStat label="Wet-bulb" value={`${t.wetBulbC.toFixed(1)}°C`} icon={<Droplets className="h-3.5 w-3.5" aria-hidden />} />
-            <LoopStat label="Dry-bulb" value={`${t.dryBulbC.toFixed(1)}°C`} icon={<Wind className="h-3.5 w-3.5" aria-hidden />} />
-          </dl>
-        </Panel>
-        <Panel title="Data quality pipeline">
-          <div className="flex flex-wrap gap-2">
-            <StatusBadge tone={qualityTotals.outliers ? "warn" : "good"}>{qualityTotals.outliers} outliers removed</StatusBadge>
-            <StatusBadge tone={qualityTotals.drift ? "warn" : "good"}>{qualityTotals.drift} drift flags</StatusBadge>
-            <StatusBadge tone="info">{qualityTotals.imputed} imputed values</StatusBadge>
-          </div>
-          {driftFlags.length ? (
-            <ul className="mt-3 space-y-1 text-xs text-amber-300">
-              {driftFlags.map((f, i) => (
-                <li key={i}>· {f}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-3 text-xs text-slate-400">
-              Z-score / isolation-forest validation active across all ingested channels.
-            </p>
-          )}
-        </Panel>
-      </div>
-    </div>
-  );
-}
-
-function LoopStat({ label, value, ok, icon }: { label: string; value: string; ok?: boolean; icon?: React.ReactNode }) {
-  return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
-      <dt className="flex items-center gap-1.5 text-xs text-slate-400">
-        {icon}
-        {label}
-      </dt>
-      <dd
-        className={`mt-0.5 font-mono text-base tabular-nums ${
-          ok === undefined ? "text-slate-100" : ok ? "text-emerald-300" : "text-red-300"
-        }`}
-      >
-        {value}
-        {ok !== undefined ? (
-          <span className="ml-1.5 text-xs">{ok ? "in bounds" : "OUT OF BOUNDS"}</span>
-        ) : null}
-      </dd>
     </div>
   );
 }

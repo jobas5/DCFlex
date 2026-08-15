@@ -1,27 +1,20 @@
 import type {
   ControlAction,
-  ControlState,
-  GuardrailResult,
+  FacilityView,
   Prediction,
   Setpoints,
-  Telemetry,
   WhatIfCandidate,
+  ZoneView,
 } from "./twin/types";
+import type { TransferProposal } from "./twin/transfer";
 
-export interface TelemetryResponse {
-  telemetry: Telemetry;
-  setpoints: Setpoints;
-  prediction: Prediction;
-  guardrails: GuardrailResult;
+export interface TelemetryCurrentResponse {
+  aggregate: FacilityView;
+  zones: ZoneView[];
 }
 
-export interface TickResponse extends TelemetryResponse {
+export interface TickResponse extends TelemetryCurrentResponse {
   quality: { outliersRemoved: number; driftFlags: string[]; imputedCount: number };
-}
-
-export interface HistoryPoint extends Telemetry {
-  pue: number;
-  wue: number;
 }
 
 export interface WhatIfResponse {
@@ -50,13 +43,71 @@ export interface WhatIfRunListItem {
   status: string;
 }
 
+export interface ControlZoneView {
+  id: number;
+  name: string;
+  mode: "shadow" | "closed_loop";
+  commsOk: boolean;
+  failSafeActive: boolean;
+  slewLimited: boolean;
+  lastHeartbeat: string | null;
+  heartbeatAgeSec: number | null;
+  watchdogTimeoutSec: number;
+  currentSetpoints: Setpoints;
+  effectiveSetpoints: Setpoints;
+  factorySetpoints: Setpoints;
+  slewLimits: { maxTempStepC: number; maxPumpStepPct: number; maxValveStepPct: number };
+  targets: { pue: number; wue: number };
+  budgets: { waterLpm: number; powerMw: number };
+  updatedAt: string;
+}
+
 export interface ControlResponse {
-  state: ControlState & {
-    watchdogTimeoutSec: number;
-    factorySetpoints: Setpoints;
-    slewLimits: { maxTempStepC: number; maxPumpStepPct: number; maxValveStepPct: number };
-  };
+  zones: ControlZoneView[];
   actions: ControlAction[];
+}
+
+export interface ZoneConfigResponse {
+  id: number;
+  name: string;
+  targetPue: number;
+  targetWue: number;
+  waterBudgetLpm: number;
+  powerBudgetMw: number;
+  mode: string;
+}
+
+export interface FacilityConfigResponse {
+  id: number;
+  totalWaterBudgetLpm: number;
+  totalPowerBudgetMw: number;
+}
+
+export interface SandboxResponse {
+  zoneId: number;
+  baseline: Prediction;
+  best: WhatIfCandidate | null;
+  feasibleCount: number;
+  candidates: WhatIfCandidate[];
+}
+
+export interface TransferResponse extends TransferProposal {
+  id: number;
+  status: string;
+  withinFacility: boolean;
+}
+
+export interface TransferListItem {
+  id: number;
+  createdAt: string;
+  sourceId: number;
+  targetId: number;
+  waterDeltaLpm: number;
+  powerDeltaMw: number;
+  sourceSetpoints: string;
+  targetSetpoints: string;
+  outcome: string;
+  status: string;
 }
 
 export interface ModelMetricsResponse {
@@ -101,10 +152,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  telemetryCurrent: () => request<TelemetryResponse>("/api/telemetry/current"),
+  telemetryCurrent: () => request<TelemetryCurrentResponse>("/api/telemetry/current"),
   telemetryTick: () => request<TickResponse>("/api/telemetry/tick", { method: "POST", body: "{}" }),
-  telemetryHistory: (limit = 96) =>
-    request<{ history: HistoryPoint[] }>(`/api/telemetry/history?limit=${limit}`),
   runWhatIf: (input: {
     alpha: number;
     beta: number;
@@ -116,13 +165,39 @@ export const api = {
   listWhatIfRuns: () => request<{ runs: WhatIfRunListItem[] }>("/api/whatif"),
   getWhatIfRun: (id: number) => request<WhatIfResponse>(`/api/whatif/${id}`),
   getControl: () => request<ControlResponse>("/api/control"),
-  setControlMode: (mode: "shadow" | "closed_loop") =>
-    request<ControlResponse>("/api/control/mode", { method: "POST", body: JSON.stringify({ mode }) }),
-  applySetpoints: (setpoints: Setpoints, note?: string) =>
-    request<ControlResponse & { applied: Setpoints; slewLimited: boolean; kind: string }>(
+  setControlMode: (clusterId: number, mode: "shadow" | "closed_loop") =>
+    request<ControlResponse>("/api/control/mode", {
+      method: "POST",
+      body: JSON.stringify({ clusterId, mode }),
+    }),
+  applySetpoints: (clusterId: number, setpoints: Setpoints, note?: string) =>
+    request<{ ok: boolean; applied: Setpoints; slewLimited: boolean; kind: string }>(
       "/api/control/apply",
-      { method: "POST", body: JSON.stringify({ setpoints, note }) },
+      { method: "POST", body: JSON.stringify({ clusterId, setpoints, note }) },
     ),
   heartbeat: () => request<{ ok: boolean }>("/api/control/heartbeat", { method: "POST", body: "{}" }),
+  listZones: () => request<{ zones: ZoneConfigResponse[] }>("/api/zones"),
+  patchZone: (id: number, patch: Partial<ZoneConfigResponse>) =>
+    request<{ ok: boolean }>(`/api/zones/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  getFacility: () => request<FacilityConfigResponse>("/api/facility"),
+  patchFacility: (patch: Partial<FacilityConfigResponse>) =>
+    request<{ ok: boolean }>("/api/facility", { method: "PATCH", body: JSON.stringify(patch) }),
+  optimizeZone: (id: number, alpha?: number, beta?: number) =>
+    request<SandboxResponse>(`/api/zones/${id}/optimize`, {
+      method: "POST",
+      body: JSON.stringify({ alpha, beta }),
+    }),
+  createTransfer: (input: {
+    sourceId: number;
+    targetId: number;
+    waterDeltaLpm?: number;
+    powerDeltaMw?: number;
+  }) => request<TransferResponse>("/api/transfers", { method: "POST", body: JSON.stringify(input) }),
+  listTransfers: () => request<{ transfers: TransferListItem[] }>("/api/transfers"),
+  transitionTransfer: (id: number, action: "virtual" | "verify" | "apply" | "reject") =>
+    request<{ ok: boolean; status: string }>(`/api/transfers/${id}/${action}`, {
+      method: "POST",
+      body: "{}",
+    }),
   modelMetrics: () => request<ModelMetricsResponse>("/api/model/metrics"),
 };

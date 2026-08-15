@@ -1,14 +1,49 @@
 import { sql } from "drizzle-orm";
 import { int, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
-export const items = sqliteTable("items", {
+export const zones = sqliteTable("zones", {
+  id: int("id").primaryKey(),
+  name: text("name").notNull(),
+  baseLoadMw: real("base_load_mw").notNull().default(4.2),
+  loadAmpMw: real("load_amp_mw").notNull().default(3.6),
+  loadPhaseH: real("load_phase_h").notNull().default(9),
+  wetBulbOffsetC: real("wet_bulb_offset_c").notNull().default(0),
+  targetPue: real("target_pue").notNull().default(1.12),
+  targetWue: real("target_wue").notNull().default(0.12),
+  waterBudgetLpm: real("water_budget_lpm").notNull().default(1200),
+  powerBudgetMw: real("power_budget_mw").notNull().default(1.0),
+  mode: text("mode").notNull().default("shadow"),
+  commsOk: int("comms_ok").notNull().default(1),
+  lastHeartbeat: text("last_heartbeat"),
+  slewLimited: int("slew_limited").notNull().default(0),
+  failSafeActive: int("fail_safe_active").notNull().default(0),
+  currentSetpoints: text("current_setpoints").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const facilityConfig = sqliteTable("facility_config", {
+  id: int("id").primaryKey(),
+  totalWaterBudgetLpm: real("total_water_budget_lpm").notNull().default(4000),
+  totalPowerBudgetMw: real("total_power_budget_mw").notNull().default(4.0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const powerTransfers = sqliteTable("power_transfers", {
   id: int("id").primaryKey({ autoIncrement: true }),
-  title: text("title").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  sourceId: int("source_id").notNull(),
+  targetId: int("target_id").notNull(),
+  waterDeltaLpm: real("water_delta_lpm").notNull().default(0),
+  powerDeltaMw: real("power_delta_mw").notNull().default(0),
+  sourceSetpoints: text("source_setpoints").notNull(),
+  targetSetpoints: text("target_setpoints").notNull(),
+  outcome: text("outcome").notNull().default("{}"),
+  status: text("status").notNull().default("shadow"),
 });
 
 export const telemetrySamples = sqliteTable("telemetry_samples", {
   id: int("id").primaryKey({ autoIncrement: true }),
+  clusterId: int("cluster_id").notNull(),
   tick: int("tick").notNull(),
   payload: text("payload").notNull(),
   pue: real("pue").notNull(),
@@ -45,19 +80,9 @@ export const whatifCandidates = sqliteTable("whatif_candidates", {
   violations: text("violations").notNull().default("[]"),
 });
 
-export const controlState = sqliteTable("control_state", {
-  id: int("id").primaryKey(),
-  mode: text("mode").notNull().default("shadow"),
-  commsOk: int("comms_ok").notNull().default(1),
-  lastHeartbeat: text("last_heartbeat"),
-  slewLimited: int("slew_limited").notNull().default(0),
-  failSafeActive: int("fail_safe_active").notNull().default(0),
-  currentSetpoints: text("current_setpoints").notNull(),
-  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
-
 export const controlActions = sqliteTable("control_actions", {
   id: int("id").primaryKey({ autoIncrement: true }),
+  clusterId: int("cluster_id").notNull(),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   mode: text("mode").notNull(),
   kind: text("kind").notNull(),

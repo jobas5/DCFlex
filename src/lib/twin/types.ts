@@ -57,25 +57,14 @@ export interface WhatIfCandidate {
   chipTempC: number;
   deltaPKpa: number;
   flowLpm: number;
+  accessoryPowerMw: number;
   feasible: boolean;
   violations: GuardrailViolation[];
 }
 
-export interface WhatIfRunSummary {
-  id: number;
-  createdAt: string;
-  alpha: number;
-  beta: number;
-  bestPue: number;
-  bestWue: number;
-  bestCost: number;
-  candidatesEvaluated: number;
-  feasibleCount: number;
-  status: string;
-}
-
 export interface ControlAction {
   id: number;
+  clusterId: number;
   createdAt: string;
   mode: string;
   kind: "would_be" | "applied" | "fail_safe";
@@ -115,3 +104,80 @@ export const SLEW_LIMITS = {
   maxPumpStepPct: 10,
   maxValveStepPct: 15,
 } as const;
+
+export const MARGIN_TIERS = { green: 5, yellow: 3 } as const;
+
+export type ZoneStatus = "green" | "yellow" | "red";
+
+export interface ZoneSpec {
+  baseLoadMw: number;
+  loadAmpMw: number;
+  loadPhaseH: number;
+  wetBulbOffsetC: number;
+}
+
+export const DEFAULT_ZONE_SPEC: ZoneSpec = {
+  baseLoadMw: 4.2,
+  loadAmpMw: 3.6,
+  loadPhaseH: 9,
+  wetBulbOffsetC: 0,
+};
+
+export interface ZoneConfig {
+  id: number;
+  name: string;
+  baseLoadMw: number;
+  loadAmpMw: number;
+  loadPhaseH: number;
+  wetBulbOffsetC: number;
+  targetPue: number;
+  targetWue: number;
+  waterBudgetLpm: number;
+  powerBudgetMw: number;
+}
+
+export interface ZoneTargets {
+  pue: number;
+  wue: number;
+}
+
+export interface ZoneBudgets {
+  waterLpm: number;
+  powerMw: number;
+}
+
+export interface BudgetUsage {
+  waterPct: number;
+  powerPct: number;
+}
+
+export interface ZoneView {
+  id: number;
+  name: string;
+  status: ZoneStatus;
+  mode: string;
+  telemetry: Telemetry;
+  prediction: Prediction;
+  guardrails: GuardrailResult;
+  setpoints: Setpoints;
+  targets: ZoneTargets;
+  budgets: ZoneBudgets;
+  budgetUsage: BudgetUsage;
+  margin: number;
+}
+
+export interface FacilityView {
+  itLoadMw: number;
+  accessoryPowerMw: number;
+  pue: number;
+  wue: number;
+  status: ZoneStatus;
+  margin: number;
+  waterLpm: number;
+  budgets: ZoneBudgets;
+  budgetUsage: BudgetUsage;
+}
+
+export function zoneStatus(margin: number): ZoneStatus {
+  return margin >= MARGIN_TIERS.green ? "green" : margin >= MARGIN_TIERS.yellow ? "yellow" : "red";
+}

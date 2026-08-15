@@ -1,5 +1,12 @@
 import { chipTempC, deltaPFromFlow, flowFromSetpoints } from "./surrogate";
-import { FACTORY_SETPOINTS, type DataQuality, type Setpoints, type Telemetry } from "./types";
+import {
+  DEFAULT_ZONE_SPEC,
+  FACTORY_SETPOINTS,
+  type DataQuality,
+  type Setpoints,
+  type Telemetry,
+  type ZoneSpec,
+} from "./types";
 
 /** Deterministic seeded PRNG (mulberry32) so history is reproducible. */
 export function mulberry32(seed: number): () => number {
@@ -22,18 +29,19 @@ export function tickTelemetry(
   prev: Telemetry | null,
   tickIndex: number,
   setpoints: Setpoints = FACTORY_SETPOINTS,
+  spec: ZoneSpec = DEFAULT_ZONE_SPEC,
 ): { telemetry: Telemetry; quality: DataQuality } {
   const rand = mulberry32(tickIndex * 7919 + 13);
   const noise = (amp: number) => (rand() - 0.5) * 2 * amp;
 
   // Time-of-day load cycle: business-hours peak, overnight trough.
   const hourOfDay = (tickIndex * 10) / 60 % 24;
-  const loadCycle = 0.5 + 0.5 * Math.sin(((hourOfDay - 9) / 24) * 2 * Math.PI);
-  const baseLoad = 4.2 + 3.6 * loadCycle;
+  const loadCycle = 0.5 + 0.5 * Math.sin(((hourOfDay - spec.loadPhaseH) / 24) * 2 * Math.PI);
+  const baseLoad = spec.baseLoadMw + spec.loadAmpMw * loadCycle;
   const itLoadMw = round2(prev ? prev.itLoadMw * 0.75 + baseLoad * 0.25 + noise(0.12) : baseLoad);
 
   // Weather: slow wet-bulb drift with diurnal wave.
-  const wetBase = 16 + 6 * Math.sin(((hourOfDay - 15) / 24) * 2 * Math.PI);
+  const wetBase = 16 + spec.wetBulbOffsetC + 6 * Math.sin(((hourOfDay - 15) / 24) * 2 * Math.PI);
   const wetBulbC = round1(
     prev ? prev.wetBulbC * 0.9 + wetBase * 0.1 + noise(0.4) : wetBase,
   );
@@ -84,15 +92,4 @@ export function tickTelemetry(
     },
     quality,
   };
-}
-
-export function generateHistory(n: number, endTick: number): Telemetry[] {
-  const out: Telemetry[] = [];
-  let prev: Telemetry | null = null;
-  for (let i = endTick - n + 1; i <= endTick; i++) {
-    const { telemetry } = tickTelemetry(prev, i);
-    out.push(telemetry);
-    prev = telemetry;
-  }
-  return out;
 }

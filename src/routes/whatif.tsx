@@ -263,30 +263,7 @@ export function WhatIfResults({
   result: WhatIfResponse;
   baseline: { pue: number; wue: number };
 }) {
-  const toast = useToast();
-  const [applying, setApplying] = useState(false);
   const best = result.best;
-
-  const applyBest = async () => {
-    if (!best) return;
-    setApplying(true);
-    try {
-      const res = await api.applySetpoints(
-        best.setpoints,
-        `What-if run #${result.runId} best candidate (J=${best.cost.toFixed(4)})`,
-      );
-      toast(
-        res.kind === "applied"
-          ? `Setpoints applied${res.slewLimited ? " with slew-rate clamping" : ""}.`
-          : "Shadow mode: would-be action logged (no writeback to CDU).",
-        res.kind === "applied" ? "success" : "info",
-      );
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "Apply failed.", "error");
-    } finally {
-      setApplying(false);
-    }
-  };
 
   if (!best) {
     return (
@@ -320,18 +297,15 @@ export function WhatIfResults({
               {dWue.toFixed(3)}) · J = {best.cost.toFixed(4)}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void applyBest()}
-            disabled={applying}
-            className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 disabled:opacity-50"
+          <Link
+            to="/control"
+            className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
           >
-            {applying ? "Applying…" : "Apply best setpoints"}
-          </button>
+            Apply per-zone on Control
+          </Link>
         </div>
         <p className="mt-2 text-xs text-slate-400">
-          In shadow mode this logs a “would-be” action only; switch to closed-loop on the Control page to write
-          setpoints to the CDU/BMS.
+          Global scenario analysis only — pick a zone and apply (or run the per-zone sandbox) on the Control page.
         </p>
       </div>
       <CandidateTable candidates={result.candidates.slice(0, 15)} />
