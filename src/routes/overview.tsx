@@ -14,7 +14,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "../components/Toast";
 import { ErrorState, KpiCard, Panel, StatusBadge } from "../components/ui";
-import { api, type TickResponse } from "../lib/api";
+import { api, type TelemetryCurrentResponse } from "../lib/api";
 import { GUARDRAILS, type FacilityView, type ForecastHorizon, type ForecastPoint, type ZoneView } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
@@ -358,7 +358,7 @@ function ForecastAlert({
 
 function OverviewPage() {
   const toast = useToast();
-  const [latest, setLatest] = useState<TickResponse | null>(null);
+  const [latest, setLatest] = useState<TelemetryCurrentResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [selectedId, setSelectedId] = useState<number | "facility">("facility");
@@ -369,7 +369,7 @@ function OverviewPage() {
 
   const load = useCallback(async () => {
     try {
-      setLatest({ ...(await api.telemetryCurrent()), quality: { outliersRemoved: 0, driftFlags: [], imputedCount: 0 } });
+      setLatest(await api.telemetryCurrent());
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load telemetry.");

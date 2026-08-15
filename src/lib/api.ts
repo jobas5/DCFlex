@@ -12,10 +12,6 @@ export interface TelemetryCurrentResponse {
   zones: ZoneView[];
 }
 
-export interface TickResponse extends TelemetryCurrentResponse {
-  quality: { outliersRemoved: number; driftFlags: string[]; imputedCount: number };
-}
-
 export interface WhatIfResponse {
   runId: number;
   createdAt?: string;
@@ -125,7 +121,6 @@ export interface TransferListItem {
   powerDeltaMw: number;
   sourceSetpoints: string;
   targetSetpoints: string;
-  outcome: string;
   status: string;
 }
 
@@ -172,7 +167,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   telemetryCurrent: () => request<TelemetryCurrentResponse>("/api/telemetry/current"),
-  telemetryTick: () => request<TickResponse>("/api/telemetry/tick", { method: "POST", body: "{}" }),
+  telemetryTick: () => request<TelemetryCurrentResponse>("/api/telemetry/tick", { method: "POST", body: "{}" }),
   runWhatIf: (input: {
     alpha: number;
     beta: number;

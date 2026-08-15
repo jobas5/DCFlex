@@ -313,17 +313,37 @@ async function controlSnapshot(env: Env) {
   };
 }
 
+function shadowSampleRow(zone: ZoneRow, telemetry: Telemetry, shadowSetpoints: Setpoints, tick: number) {
+  const sp = predict(telemetry, shadowSetpoints);
+  const actual = predict(telemetry, parseSetpoints(zone.currentSetpoints));
+  const sg = evaluateGuardrails(sp);
+  const budgetOk = sp.flowLpm <= zone.waterBudgetLpm && sp.accessoryPowerMw <= zone.powerBudgetMw;
+  const meetsTarget = Math.abs(sp.pue - zone.targetPue) <= 0.02 && Math.abs(sp.wue - zone.targetWue) <= 0.02;
+  return {
+    clusterId: zone.id,
+    tick,
+    setpoints: JSON.stringify(shadowSetpoints),
+    predictedPue: sp.pue,
+    predictedWue: sp.wue,
+    actualPue: actual.pue,
+    actualWue: actual.wue,
+    chipTempC: sp.chipTempC,
+    feasible: sg.feasible ? 1 : 0,
+    budgetOk: budgetOk ? 1 : 0,
+    meetsTarget: meetsTarget ? 1 : 0,
+  };
+}
+
 async function advanceSimulation(env: Env) {
   const db = getDb(env);
   const allZones = await listZones(env);
   const nextTick = (await getMaxTick(env)) + 1;
   const now = new Date().toISOString();
-  const quality = { outliersRemoved: 0, driftFlags: [] as string[], imputedCount: 0 };
   const views: ZoneView[] = [];
   for (const z of allZones) {
     const prev = await latestTelemetryForZone(env, z);
     const steered = await steerZone(env, z, prev);
-    const { telemetry, quality: q } = tickTelemetry(prev, nextTick, steered, zoneSpec(z));
+    const { telemetry } = tickTelemetry(prev, nextTick, steered, zoneSpec(z));
     const prediction = predict(telemetry, steered);
     await db.insert(telemetrySamples).values({
       clusterId: z.id,
@@ -332,32 +352,9 @@ async function advanceSimulation(env: Env) {
       pue: prediction.pue,
       wue: prediction.wue,
     });
-    // Shadow validation: score the fixed shadow config against live telemetry.
     if (z.shadowSetpoints) {
-      const shadowSetpoints = parseSetpoints(z.shadowSetpoints);
-      const sp = predict(telemetry, shadowSetpoints);
-      const sg = evaluateGuardrails(sp);
-      const budgetOk =
-        sp.flowLpm <= z.waterBudgetLpm && sp.accessoryPowerMw <= z.powerBudgetMw;
-      const meetsTarget =
-        Math.abs(sp.pue - z.targetPue) <= 0.02 && Math.abs(sp.wue - z.targetWue) <= 0.02;
-      await db.insert(shadowSamples).values({
-        clusterId: z.id,
-        tick: nextTick,
-        setpoints: JSON.stringify(shadowSetpoints),
-        predictedPue: sp.pue,
-        predictedWue: sp.wue,
-        actualPue: prediction.pue,
-        actualWue: prediction.wue,
-        chipTempC: sp.chipTempC,
-        feasible: sg.feasible ? 1 : 0,
-        budgetOk: budgetOk ? 1 : 0,
-        meetsTarget: meetsTarget ? 1 : 0,
-      });
+      await db.insert(shadowSamples).values(shadowSampleRow(z, telemetry, parseSetpoints(z.shadowSetpoints), nextTick));
     }
-    quality.outliersRemoved += q.outliersRemoved;
-    quality.imputedCount += q.imputedCount;
-    quality.driftFlags.push(...q.driftFlags.map((f) => `${z.name}: ${f}`));
     views.push(buildZoneView(z, telemetry, steered));
   }
   // Feed the watchdog so it doesn't fail-safe while idle.
@@ -372,7 +369,7 @@ async function advanceSimulation(env: Env) {
     .delete(shadowSamples)
     .where(lt(shadowSamples.tick, nextTick - 1008));
   const facility = await getFacility(env);
-  return { aggregate: buildFacility(views, facility), zones: views, quality };
+  return { aggregate: buildFacility(views, facility), zones: views };
 }
 
 async function handleApi(request: Request, env: Env): Promise<Response> {
@@ -608,23 +605,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       .where(eq(zones.id, zone.id));
     // Fresh validation run: clear old samples and log an immediate sample + action.
     await db.delete(shadowSamples).where(eq(shadowSamples.clusterId, zone.id));
-    const budgetOk =
-      prediction.flowLpm <= zone.waterBudgetLpm && prediction.accessoryPowerMw <= zone.powerBudgetMw;
-    const meetsTarget =
-      Math.abs(prediction.pue - zone.targetPue) <= 0.02 && Math.abs(prediction.wue - zone.targetWue) <= 0.02;
-    await db.insert(shadowSamples).values({
-      clusterId: zone.id,
-      tick: telemetry.tick,
-      setpoints: JSON.stringify(body.setpoints),
-      predictedPue: prediction.pue,
-      predictedWue: prediction.wue,
-      actualPue: predict(telemetry, parseSetpoints(zone.currentSetpoints)).pue,
-      actualWue: predict(telemetry, parseSetpoints(zone.currentSetpoints)).wue,
-      chipTempC: prediction.chipTempC,
-      feasible: 1,
-      budgetOk: budgetOk ? 1 : 0,
-      meetsTarget: meetsTarget ? 1 : 0,
-    });
+    await db.insert(shadowSamples).values(shadowSampleRow(zone, telemetry, body.setpoints, telemetry.tick));
     await db.insert(controlActions).values({
       clusterId: zone.id,
       mode: zone.mode,
