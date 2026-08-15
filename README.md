@@ -1,120 +1,124 @@
 # DCFlex
 
-A monitoring and optimization dashboard — a physics-guided digital twin — for high-density liquid-cooled data centers, balancing thermal safety, PUE (energy efficiency), and WUE (water efficiency). All telemetry is simulated by a seeded, deterministic generator, so no physical BMS/CDU hardware is required.
+> A monitoring and optimization dashboard — a physics-guided digital twin — for high-density liquid-cooled data centers, balancing thermal safety, PUE (energy efficiency), and WUE (water efficiency). All telemetry is simulated by a seeded, deterministic generator, so no physical BMS/CDU hardware is required.
 
-## Project overview
+![Version](https://img.shields.io/badge/version-1.4.2-22d3ee) ![Build](https://img.shields.io/badge/build-passing-34d399) ![Typecheck](https://img.shields.io/badge/typecheck-passing-34d399)
 
-The app is a single-page dashboard with five screens:
+<!-- Screenshot: add a dashboard capture here -->
 
-| Screen | Route | What it does |
-| --- | --- | --- |
-| **Overview** | `/` | Live KPIs (PUE, WUE, IT load, accessory power, thermal margin), trend charts, CDU/FWS loop panels, data-quality pipeline counters, and a pause/resume control for the telemetry stream. |
-| **What-If Engine** | `/whatif` | Counterfactual analysis: set α/β objective weights and a scenario (IT load, ambient preset), then grid-search **1,560 setpoint permutations** under hard guardrails and rank results by J = α·PUE + β·WUE. Best setpoints can be applied to the control loop; runs are persisted and shareable at `/whatif/<runId>`. |
-| **Control Loop** | `/control` | Phased rollout control: Phase A shadow mode vs Phase B closed-loop, slew-rate-limited setpoint changes, a 30-second heartbeat watchdog with fail-safe to factory setpoints, and an action audit log. |
-| **Surrogate Model** | `/model` | Model card for the monotonicity-constrained surrogate (LightGBM-style, ONNX export), metric gauges vs accuracy targets, KL-divergence drift chart, and a monotonicity proof curve. |
-| **Docs** | `/docs` | In-app system documentation with a downloadable Markdown export. |
+## Why?
 
-Hard guardrails enforced everywhere: T_chip ≤ 85°C, ΔP 60–240 kPa, flow 400–1600 L/min.
+Data-center operators must keep chips thermally safe while minimizing two competing costs: energy (PUE) and water (WUE). DCFlex models the facility as a digital twin and lets operators simulate, verify, and safely apply cooling decisions — instead of tuning physical CDU/BMS setpoints by hand. Everything runs against simulated telemetry, so the full workflow is exercisable without hardware.
 
-## Tech stack
+## Features
 
-- **Frontend:** React 19 + Vite + TypeScript, TanStack Router, Tailwind CSS v4, lucide-react icons, custom SVG charts
-- **Backend:** Cloudflare Worker (TypeScript) serving JSON under `/api/*`
-- **Database:** Cloudflare D1 (SQLite) via Drizzle ORM
-- **Simulation:** in-process TypeScript digital twin (seeded telemetry generator, physics-guided surrogate, grid-search optimizer) shared between client and Worker
+- **Overview** — facility-level KPIs (PUE, WUE, IT load, accessory power, thermal margin), per-zone monitoring cards, and time-range trend charts.
+- **What-If Engine** — grid-search **1,560 setpoint permutations** under hard guardrails, ranked by J = α·PUE + β·WUE; results persist and are shareable at `/optimize/<runId>`.
+- **Shadow Validation** — validate a recommended scenario against live telemetry before enabling closed-loop control (Analyze → Shadow → Validate → Closed-loop).
+- **Cooling Transfer** — reallocate water flow and chiller power from a safe zone to a hot zone, with live impact preview and budget reallocation on apply.
+- **Surrogate Model** — an informational explainer of the monotonicity-constrained model behind DCFlex.
+- **Master Data** — single source of truth for zone targets/budgets and facility budgets, with validation against guardrails and facility totals.
+- **Authentication** — single-account username/password login (PBKDF2 + signed session cookie).
+- **Telegram alerts** — optional edge-triggered notifications for guardrail violations, fail-safes, and thermal-forecast warnings.
+- **Hard guardrails everywhere** — T_chip ≤ 85°C, ΔP 60–240 kPa, flow 400–1600 L/min.
 
-## Prerequisites
-
-- **Node.js 18+** and npm (pnpm or bun also work)
-- A **Cloudflare account** — only needed for deployment and remote D1, not for local development
-
-## Getting started
+## Quick start
 
 ```bash
-# Clone the repository, then from the project root:
 npm install
+npm run db:migrate:local
+npm run db:seed:local
 npm run dev
 ```
 
-This starts the Vite dev server with the Cloudflare plugin, so the Worker API (`/api/*`) and the local D1 database work the same way they do in production. Complete the database setup below before first use so the app has data to serve.
+Then open the printed local URL. Default dev login: **`admin` / `dcflex12`** (override via auth secrets — see Configuration).
 
-## Database setup
+## Usage
 
-The D1 database binding is named `DB`. Wrangler keeps a local SQLite-backed copy under `.wrangler/` when you use `--local` commands.
-
-```bash
-# Apply migrations to the local D1 database
-npm run db:migrate:local
-
-# Populate demo data (telemetry history, what-if runs, control state, model metrics)
-npm run db:seed:local
-```
-
-For the remote (deployed) database:
-
-```bash
-npm run db:migrate:remote
-npm run db:seed:remote
-```
-
-`seeds/local.sql` is safe to re-run — it uses `INSERT OR IGNORE` / upserts throughout. After changing `src/db/schema.ts`, regenerate migrations with `npm run db:generate` and then apply them. Migrations in `migrations/` are append-only: never edit existing files.
-
-## Available scripts
-
-All scripts are defined in `package.json`:
-
-| Script | Command | Description |
+| Screen | Route | What it does |
 | --- | --- | --- |
-| `dev` | `vite dev` | Start the local dev server (frontend + Worker API + local D1). |
-| `build` | `vite build` | Production build of client assets and the Worker into `dist/`. |
-| `typecheck` | `tsc -p tsconfig.json --noEmit` | Type-check the whole project without emitting files. |
-| `preview` | `vite preview` | Preview the production build locally. |
-| `db:generate` | `drizzle-kit generate` | Generate a new SQL migration from changes in `src/db/schema.ts`. |
-| `db:migrate:local` | `wrangler d1 migrations apply DB --local` | Apply migrations to the local D1 database. |
-| `db:migrate:remote` | `wrangler d1 migrations apply DB --remote` | Apply migrations to the remote D1 database. |
-| `db:seed:local` | `wrangler d1 execute DB --local --file=./seeds/local.sql` | Seed the local D1 database with demo data. |
-| `db:seed:remote` | `wrangler d1 execute DB --remote --file=./seeds/local.sql` | Seed the remote D1 database with demo data. |
+| **Overview** | `/` | Facility KPIs, zone status cards, per-zone monitoring with trend charts and a time-range selector. |
+| **Optimization** | `/optimize` | What-If Engine: set α/β weights + scenario, run the grid search, review summary/recommended action/zone performance, and start shadow validation. |
+| **Shadow Validation** | `/shadow` | Validate a scenario against live telemetry; Auto follows the what-if recommendation, Manual lets you edit setpoints, then enable closed-loop. |
+| **Cooling Transfer** | `/transfer` | Reallocate water/power between a source and target zone with live before→after impact. |
+| **Surrogate Model** | `/model` | Informational explainer of the model's data pipeline, physics constraints, and performance. |
+| **Master Data** | `/master` | Configure zone targets/budgets and facility budgets. |
 
-## Environment & configuration
+Runs are persisted; view a specific run at `/optimize/<runId>`.
+
+## How it works
+
+1. **Seeded telemetry** — a deterministic generator simulates IT load, weather, flow, and die temperatures per zone (10-minute ticks).
+2. **Surrogate model** — a physics-guided, monotonicity-constrained predictor (LightGBM-style, ONNX export) estimates PUE/WUE/chip temperature from setpoints.
+3. **What-If engine** — a grid search over setpoint permutations minimizes **J = α·PUE + β·WUE** subject to hard guardrails.
+4. **Control** — recommendations are validated in shadow mode before closed-loop writeback; slew-rate limits and a watchdog fail-safe protect the real engine.
+
+## Configuration
 
 Worker configuration lives in **`wrangler.jsonc`** (not `wrangler.toml`):
 
 - `main`: `./worker/index.ts` — the Worker entry point serving `/api/*`
-- `assets`: static frontend from `dist/client`, with single-page-application fallback (`not_found_handling`) and `run_worker_first` for `/api/*`
+- `assets`: static frontend from `dist/client`, with single-page-application fallback and `run_worker_first` for `/api/*`
 - `d1_databases`: the `DB` binding → D1 database `dc-cooling-db`
 
-No environment variables or secrets are required by default; the only runtime binding is the `DB` D1 database, accessed through `getDb(env)` in `src/db/client.ts`. Drizzle Kit reads `drizzle.config.ts` for migration generation.
+### Secrets (`.dev.vars` locally, `wrangler secret put` in production)
 
-Optional Telegram alerts (guardrail violations, watchdog fail-safe, thermal-margin transitions, heat-forecast warnings) are sent from the cron tick when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set (locally in `.dev.vars`, in production via `wrangler secret put`). `DASHBOARD_URL` adds a link to each message. Alerts are edge-triggered and deduplicated via the `alert_events` table, so a sustained condition notifies once.
+| Secret | Purpose |
+| --- | --- |
+| `DB` | D1 binding (runtime binding, not a secret) |
+| `AUTH_USERNAME` | Operator username (dev default `admin`) |
+| `AUTH_PASSWORD_HASH` | PBKDF2-SHA256 hash of the password |
+| `AUTH_SECRET` | Random 32-byte hex used to sign the session cookie |
+| `TELEGRAM_BOT_TOKEN` | (optional) Telegram bot token for alerts |
+| `TELEGRAM_CHAT_ID` | (optional) Telegram chat/channel id for alerts |
+| `DASHBOARD_URL` | (optional) Base URL linked in alert messages |
 
-## Authentication
-
-Single-account login (username + password) gates the whole app. Set three secrets (`.dev.vars` locally, `wrangler secret put` in production):
-
-- `AUTH_USERNAME` — the operator username (dev default: `admin`).
-- `AUTH_PASSWORD_HASH` — a PBKDF2-SHA256 hash in the form `pbkdf2:iterations:saltHex:hashHex`. Generate with (Web Crypto, same path the worker verifies with):
-  ```bash
-  node -e "const e=new TextEncoder();const H=x=>[...new Uint8Array(x)].map(b=>b.toString(16).padStart(2,'0')).join('');const F=h=>{const b=new Uint8Array(h.length/2);for(let i=0;i<b.length;i++)b[i]=parseInt(h.slice(i*2,i*2+2),16);return b};(async()=>{const s=crypto.getRandomValues(new Uint8Array(16));const k=await crypto.subtle.importKey('raw',e.encode('YOUR_PASSWORD'),'PBKDF2',false,['deriveBits']);const d=await crypto.subtle.deriveBits({name:'PBKDF2',salt:s,iterations:100000,hash:'SHA-256'},k,256);console.log('pbkdf2:100000:'+H(s.buffer)+':'+H(d))})()"
-  ```
-- `AUTH_SECRET` — random 32-byte hex used to sign the session cookie:
-  ```bash
-  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-  ```
-
-On login the worker sets an `HttpOnly` session cookie (`SameSite=Lax`, `Secure` in production) valid for 12 hours. All `/api/*` routes except `/api/auth/login`, `/api/auth/logout`, `/api/auth/me`, and `/api/health` require a valid session. If any of the three secrets is missing, login fails closed (no access).
-
-## Build & deploy
+Generate the password hash (Web Crypto, same path the worker verifies with):
 
 ```bash
-# Type-check and build production assets + Worker
-npm run typecheck
-npm run build
+node -e "const e=new TextEncoder();const H=x=>[...new Uint8Array(x)].map(b=>b.toString(16).padStart(2,'0')).join('');(async()=>{const s=crypto.getRandomValues(new Uint8Array(16));const k=await crypto.subtle.importKey('raw',e.encode('YOUR_PASSWORD'),'PBKDF2',false,['deriveBits']);const d=await crypto.subtle.deriveBits({name:'PBKDF2',salt:s,iterations:100000,hash:'SHA-256'},k,256);console.log('pbkdf2:100000:'+H(s.buffer)+':'+H(d))})()"
+```
 
-# Deploy to Cloudflare Workers
+Generate `AUTH_SECRET`:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+On login the worker sets an `HttpOnly` session cookie (`SameSite=Lax`, `Secure` in production) valid for 12 hours. All `/api/*` routes except `/api/auth/login`, `/api/auth/logout`, `/api/auth/me`, and `/api/health` require a valid session. If any auth secret is missing, login fails closed (no access).
+
+### Telegram alerts
+
+Guardrail violations, watchdog fail-safes, thermal-margin transitions, and heat-forecast warnings are sent from the cron tick when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Alerts are edge-triggered and deduplicated via the `alert_events` table, so a sustained condition notifies once.
+
+## API
+
+Full endpoint reference: see **[API.md](API.md)**. For the complete technical reference (stack, parameters, flows, integrations), see **[APPLICATION.md](APPLICATION.md)**.
+
+## Development
+
+```bash
+npm install
+npm run dev            # frontend + Worker API + local D1
+npm run typecheck      # tsc --noEmit
+npm run build          # production client + Worker into dist/
+npm run preview        # preview the production build
+
+npm run db:generate    # regenerate SQL migrations from src/db/schema.ts
+npm run db:migrate:local / :remote
+npm run db:seed:local / :remote
+```
+
+`seeds/local.sql` is safe to re-run (`INSERT OR IGNORE` / upserts). Migrations in `migrations/` are append-only: never edit existing files.
+
+### Deploy
+
+```bash
+npm run typecheck && npm run build
 npx wrangler deploy
 ```
 
-Before deploying, make sure the remote database is migrated and seeded (`npm run db:migrate:remote` and `npm run db:seed:remote`).
+Migrate and seed the remote database first (`npm run db:migrate:remote` + `npm run db:seed:remote`), and set the auth secrets via `wrangler secret put`.
 
 ## Project structure
 
@@ -122,29 +126,45 @@ Before deploying, make sure the remote database is migrated and seeded (`npm run
 .
 ├── index.html                # Vite entry HTML
 ├── vite.config.ts            # Vite + React + Tailwind + Cloudflare plugin
-├── wrangler.jsonc            # Worker config: assets, SPA fallback, D1 binding
+├── wrangler.jsonc            # Worker config: assets, SPA fallback, D1 binding, cron
 ├── drizzle.config.ts         # Drizzle Kit config for migration generation
 ├── worker/
-│   └── index.ts              # Cloudflare Worker: all /api/* endpoints
-│                             #   (telemetry, what-if, control, model metrics)
+│   ├── index.ts              # Cloudflare Worker: all /api/* endpoints + cron
+│   ├── auth.ts               # PBKDF2 password verify, HMAC session tokens, login rate limit
+│   ├── telegram.ts           # Telegram alert evaluation + sender
+│   ├── alertLogic.ts         # Edge-triggered alert state machine (pure)
+│   └── telegram.check.mjs    # runnable self-check for alertLogic
 ├── src/
 │   ├── main.tsx              # Router setup and app bootstrap
-│   ├── styles.css            # Tailwind v4 entry
-│   ├── routes/               # Screens: root layout, overview, whatif,
-│   │                         #   whatifDetail, control, model, docs, notFound
-│   ├── components/           # UI primitives (Panel, KpiCard, StatusBadge…),
-│   │                         #   LineChart, SetpointSliders, Toast
+│   ├── styles.css            # Tailwind v4 entry + theme tokens + keyframes
+│   ├── routes/               # root, overview, optimize, optimizeDetail, shadow,
+│   │                         #   transfer, model, masterData, login, notFound
+│   ├── components/           # LineChart, StatusBar, Toast, ui (Panel, KpiCard, badges…)
 │   ├── lib/
 │   │   ├── api.ts            # Typed fetch client for /api/*
-│   │   ├── twin/             # Digital twin: simulator, surrogate model,
-│   │   │                     #   optimizer (grid search), model card, types
-│   │   └── docs/             # Canonical Markdown source for the Docs page export
+│   │   ├── auth.tsx          # AuthProvider / useAuth
+│   │   ├── simContext.tsx    # Live telemetry polling provider
+│   │   ├── time.ts           # Sim-time formatting (WIB)
+│   │   ├── tokens.ts         # Chart/severity color tokens
+│   │   └── twin/             # simulator, surrogate, optimizer, forecast, transfer,
+│   │                         #   modelMeta, modelInsights, types
 │   └── db/
-│       ├── schema.ts         # Drizzle schema: telemetry_samples, whatif_runs,
-│       │                     #   whatif_candidates, control_state,
-│       │                     #   control_actions, model_metrics
+│       ├── schema.ts         # Drizzle schema (zones, facility_config, telemetry_samples,
+│       │                     #   whatif_runs, whatif_candidates, control_actions,
+│       │                     #   shadow_samples, power_transfers, alert_events, model_metrics)
 │       └── client.ts         # getDb(env) — Drizzle over the D1 binding
 ├── migrations/               # Append-only generated SQL migrations (+ meta/)
 └── seeds/
     └── local.sql             # Re-runnable demo seed data
 ```
+
+## Roadmap
+
+- **Multi-user auth** with roles (the HMAC session scheme is upgradeable without changing the cookie format).
+- **Real BMS/CDU integration** — replace the seeded telemetry generator with live protocol adapters (BACnet, Modbus, MQTT).
+- **Per-zone surrogate calibration** against real measurements.
+- **Production hardening** — session invalidation, audit logging, stronger rate limiting.
+
+## License
+
+[MIT](LICENSE)
