@@ -5,7 +5,7 @@
 ![Version](https://img.shields.io/badge/version-1.4.2-22d3ee) ![Build](https://img.shields.io/badge/build-passing-34d399) ![Typecheck](https://img.shields.io/badge/typecheck-passing-34d399)
 
 ![alt text](image.png)
-[Visit Youtube for the Deom](https://youtu.be/QqDnEzUNBKY)
+[Visit Youtube for the Demo](https://youtu.be/QqDnEzUNBKY)
 
 ## Why?
 
