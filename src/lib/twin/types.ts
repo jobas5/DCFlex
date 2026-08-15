@@ -164,6 +164,7 @@ export interface ZoneView {
   budgets: ZoneBudgets;
   budgetUsage: BudgetUsage;
   margin: number;
+  forecast: ZoneForecast;
 }
 
 export interface FacilityView {
@@ -176,8 +177,20 @@ export interface FacilityView {
   waterLpm: number;
   budgets: ZoneBudgets;
   budgetUsage: BudgetUsage;
+  forecast: ZoneForecast;
 }
 
 export function zoneStatus(margin: number): ZoneStatus {
   return margin >= MARGIN_TIERS.green ? "green" : margin >= MARGIN_TIERS.yellow ? "yellow" : "red";
 }
+
+export type ForecastHorizon = "15m" | "1h" | "4h" | "24h";
+
+export interface ForecastPoint {
+  peakChipTempC: number;
+  peakAtTicks: number;
+  worstMargin: number;
+  rising: boolean;
+}
+
+export type ZoneForecast = Record<ForecastHorizon, ForecastPoint>;

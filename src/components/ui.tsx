@@ -38,14 +38,16 @@ export function Panel({
   children,
   action,
   className = "",
+  id,
 }: {
   title: string;
   children: ReactNode;
   action?: ReactNode;
   className?: string;
+  id?: string;
 }) {
   return (
-    <section className={`rounded-xl border border-slate-700/60 bg-slate-900/70 p-4 ${className}`}>
+    <section id={id} className={`rounded-xl border border-slate-700/60 bg-slate-900/70 p-4 ${className}`}>
       <div className="mb-3 flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">{title}</h2>
         {action}

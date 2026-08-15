@@ -1,9 +1,10 @@
-import { createRoute } from "@tanstack/react-router";
+import { createRoute, Link } from "@tanstack/react-router";
 import { BrainCircuit, CheckCircle2, FileBox, Scale, Timer } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { LineChart } from "../components/LineChart";
 import { ErrorState, Panel, StatusBadge } from "../components/ui";
 import { api, type ModelMetricsResponse } from "../lib/api";
+import { modelInsights } from "../lib/twin/modelInsights";
 import { monotonicityCurve } from "../lib/twin/modelMeta";
 import { FACTORY_SETPOINTS } from "../lib/twin/types";
 import { rootRoute } from "./root";
@@ -14,6 +15,7 @@ function MetricGauge({
   target,
   format,
   pass,
+  explain,
   icon: Icon,
 }: {
   label: string;
@@ -21,6 +23,7 @@ function MetricGauge({
   target: string;
   format: (v: number) => string;
   pass: boolean;
+  explain: string;
   icon: typeof Timer;
 }) {
   return (
@@ -42,6 +45,7 @@ function MetricGauge({
         )}
         <span className="text-slate-400">· target {target}</span>
       </p>
+      <p className="mt-2 text-xs leading-relaxed text-slate-400">{explain}</p>
     </div>
   );
 }
@@ -68,9 +72,12 @@ function ModelPage() {
 
   const { latest, card, drift } = data;
   const mono = monotonicityCurve(FACTORY_SETPOINTS);
+  const health = modelInsights({ latest, card });
   const driftLabels = drift.map((d) =>
     new Date(d.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
   );
+
+  const healthTone = health.status === "good" ? "good" : health.status === "watch" ? "warn" : "bad";
 
   return (
     <div className="space-y-4">
@@ -79,6 +86,27 @@ function ModelPage() {
         <p className="text-sm text-slate-400">
           Physics-guided gradient boosting predicting facility accessory cooling power
         </p>
+      </div>
+
+      <div className="rounded-xl border border-slate-700/60 bg-slate-900/70 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <StatusBadge tone={healthTone}>
+              {health.status === "good" ? "Healthy" : health.status === "watch" ? "Watch" : "Retrain needed"}
+            </StatusBadge>
+            <h2 className="text-sm font-semibold text-slate-200">Model health</h2>
+          </div>
+          {health.action ? (
+            <Link
+              to={health.action.to}
+              className="rounded-lg border border-cyan-500/50 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 focus-visible:outline-2 focus-visible:outline-cyan-400"
+            >
+              {health.action.label} →
+            </Link>
+          ) : null}
+        </div>
+        <p className="mt-2 text-sm text-slate-300">{health.summary}</p>
+        <p className="mt-1 text-sm text-slate-400">{health.recommendation}</p>
       </div>
 
       <Panel title="Model card">
@@ -135,6 +163,7 @@ function ModelPage() {
           target={`≤ ${card.targets.maeMw} MW`}
           format={(v) => `${v.toFixed(3)} MW`}
           pass={latest.maeMw <= card.targets.maeMw}
+          explain={`Average prediction error on cooling power. ${latest.maeMw.toFixed(3)} MW ≈ ${Math.round(latest.maeMw * 1000)} kW — about the draw of a few GPU racks.`}
           icon={Scale}
         />
         <MetricGauge
@@ -143,6 +172,7 @@ function ModelPage() {
           target={`≥ ${card.targets.pueCoveragePct}%`}
           format={(v) => `${v.toFixed(1)}%`}
           pass={latest.pueCoverage >= card.targets.pueCoveragePct}
+          explain={`How often a PUE prediction lands within ±0.01 of reality. ${latest.pueCoverage.toFixed(1)}% = ${Math.round(latest.pueCoverage)} of every 100 predictions.`}
           icon={CheckCircle2}
         />
         <MetricGauge
@@ -151,6 +181,7 @@ function ModelPage() {
           target="p50 < 10 ms (ONNX)"
           format={(v) => `${v.toFixed(1)} ms`}
           pass={latest.inferenceLatencyMs < 10}
+          explain={`Time per prediction. ${latest.inferenceLatencyMs.toFixed(1)} ms means all 1,560 what-if scenarios score in well under a second.`}
           icon={Timer}
         />
         <MetricGauge
@@ -159,6 +190,7 @@ function ModelPage() {
           target={`warn ≥ ${card.drift.warnThreshold}`}
           format={(v) => v.toFixed(3)}
           pass={latest.klDivergence < card.drift.warnThreshold}
+          explain={`How far the facility has drifted from the model's training data. Below ${card.drift.warnThreshold} is trustworthy; retrain after ${card.drift.warnThreshold}, urgently before ${card.drift.criticalThreshold}.`}
           icon={BrainCircuit}
         />
       </div>
@@ -173,6 +205,10 @@ function ModelPage() {
             threshold={{ value: card.drift.warnThreshold, label: "warn 0.08", color: "#f87171" }}
           />
           <p className="mt-2 text-xs text-slate-400">{card.drift.metric}. Retrain trigger at {card.drift.criticalThreshold}.</p>
+          <p className="mt-1 text-xs text-slate-500">
+            In plain terms: each point is that hour's "how different is the facility from training". A rising line means the
+            facility is changing (new hardware, season) and the model is aging.
+          </p>
         </Panel>
         <Panel title="Monotonicity proof — accessory power vs IT load">
           <LineChart
@@ -184,6 +220,10 @@ function ModelPage() {
           <p className="mt-2 text-xs text-slate-400">
             Response is structurally non-decreasing in IT load — a required monotonic constraint verified on every
             export.
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            In plain terms: this proves the model can never say "more heat needs less cooling". The line only goes up —
+            that's the safety guarantee behind every what-if answer.
           </p>
         </Panel>
       </div>

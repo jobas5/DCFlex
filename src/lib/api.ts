@@ -1,7 +1,6 @@
 import type {
   ControlAction,
   FacilityView,
-  Prediction,
   Setpoints,
   WhatIfCandidate,
   ZoneView,
@@ -20,6 +19,7 @@ export interface TickResponse extends TelemetryCurrentResponse {
 export interface WhatIfResponse {
   runId: number;
   createdAt?: string;
+  zoneId: number | null;
   alpha: number;
   beta: number;
   evaluated: number;
@@ -33,6 +33,7 @@ export interface WhatIfResponse {
 export interface WhatIfRunListItem {
   id: number;
   createdAt: string;
+  zoneId: number | null;
   alpha: number;
   beta: number;
   bestPue: number | null;
@@ -54,6 +55,7 @@ export interface ControlZoneView {
   heartbeatAgeSec: number | null;
   watchdogTimeoutSec: number;
   currentSetpoints: Setpoints;
+  shadowSetpoints: Setpoints | null;
   effectiveSetpoints: Setpoints;
   factorySetpoints: Setpoints;
   slewLimits: { maxTempStepC: number; maxPumpStepPct: number; maxValveStepPct: number };
@@ -83,12 +85,29 @@ export interface FacilityConfigResponse {
   totalPowerBudgetMw: number;
 }
 
-export interface SandboxResponse {
+export interface ValidationResponse {
   zoneId: number;
-  baseline: Prediction;
-  best: WhatIfCandidate | null;
-  feasibleCount: number;
-  candidates: WhatIfCandidate[];
+  hasShadowConfig: boolean;
+  shadowSetpoints: Setpoints | null;
+  total: number;
+  feasible: number;
+  budgetOk: number;
+  meets: number;
+  feasibleRate: number;
+  meetsRate: number;
+  avgPueGap: number;
+  ready: boolean;
+  samples: {
+    tick: number;
+    predictedPue: number;
+    predictedWue: number;
+    actualPue: number;
+    actualWue: number;
+    chipTempC: number;
+    feasible: boolean;
+    budgetOk: boolean;
+    meetsTarget: boolean;
+  }[];
 }
 
 export interface TransferResponse extends TransferProposal {
@@ -157,6 +176,7 @@ export const api = {
   runWhatIf: (input: {
     alpha: number;
     beta: number;
+    zoneId?: number;
     itLoadMw?: number;
     wetBulbC?: number;
     baseSetpoints?: Setpoints;
@@ -175,6 +195,12 @@ export const api = {
       "/api/control/apply",
       { method: "POST", body: JSON.stringify({ clusterId, setpoints, note }) },
     ),
+  applyShadow: (clusterId: number, setpoints: Setpoints) =>
+    request<{ ok: boolean; shadowSetpoints: Setpoints }>("/api/control/applyShadow", {
+      method: "POST",
+      body: JSON.stringify({ clusterId, setpoints }),
+    }),
+  getValidation: (zoneId: number) => request<ValidationResponse>(`/api/zones/${zoneId}/validation`),
   heartbeat: () => request<{ ok: boolean }>("/api/control/heartbeat", { method: "POST", body: "{}" }),
   listZones: () => request<{ zones: ZoneConfigResponse[] }>("/api/zones"),
   patchZone: (id: number, patch: Partial<ZoneConfigResponse>) =>
@@ -182,11 +208,6 @@ export const api = {
   getFacility: () => request<FacilityConfigResponse>("/api/facility"),
   patchFacility: (patch: Partial<FacilityConfigResponse>) =>
     request<{ ok: boolean }>("/api/facility", { method: "PATCH", body: JSON.stringify(patch) }),
-  optimizeZone: (id: number, alpha?: number, beta?: number) =>
-    request<SandboxResponse>(`/api/zones/${id}/optimize`, {
-      method: "POST",
-      body: JSON.stringify({ alpha, beta }),
-    }),
   createTransfer: (input: {
     sourceId: number;
     targetId: number;

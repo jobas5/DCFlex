@@ -18,6 +18,7 @@ export const zones = sqliteTable("zones", {
   slewLimited: int("slew_limited").notNull().default(0),
   failSafeActive: int("fail_safe_active").notNull().default(0),
   currentSetpoints: text("current_setpoints").notNull(),
+  shadowSetpoints: text("shadow_setpoints"),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
@@ -54,6 +55,7 @@ export const telemetrySamples = sqliteTable("telemetry_samples", {
 export const whatifRuns = sqliteTable("whatif_runs", {
   id: int("id").primaryKey({ autoIncrement: true }),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  zoneId: int("zone_id"),
   alpha: real("alpha").notNull(),
   beta: real("beta").notNull(),
   baseSetpoints: text("base_setpoints").notNull(),
@@ -88,6 +90,22 @@ export const controlActions = sqliteTable("control_actions", {
   kind: text("kind").notNull(),
   setpoints: text("setpoints").notNull(),
   note: text("note").notNull().default(""),
+});
+
+export const shadowSamples = sqliteTable("shadow_samples", {
+  id: int("id").primaryKey({ autoIncrement: true }),
+  clusterId: int("cluster_id").notNull(),
+  tick: int("tick").notNull(),
+  setpoints: text("setpoints").notNull(),
+  predictedPue: real("predicted_pue").notNull(),
+  predictedWue: real("predicted_wue").notNull(),
+  actualPue: real("actual_pue").notNull(),
+  actualWue: real("actual_wue").notNull(),
+  chipTempC: real("chip_temp_c").notNull(),
+  feasible: int("feasible").notNull(),
+  budgetOk: int("budget_ok").notNull(),
+  meetsTarget: int("meets_target").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
 export const modelMetrics = sqliteTable("model_metrics", {

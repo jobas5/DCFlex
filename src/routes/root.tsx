@@ -1,8 +1,9 @@
 import { createRootRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
   Activity,
+  ArrowLeftRight,
   BrainCircuit,
-  FlaskConical,
+  Database,
   Gauge as GaugeIcon,
   Snowflake,
 } from "lucide-react";
@@ -10,9 +11,10 @@ import { ToastProvider } from "../components/Toast";
 
 const NAV = [
   { to: "/", label: "Overview", icon: GaugeIcon },
-  { to: "/whatif", label: "What-If Engine", icon: FlaskConical },
-  { to: "/control", label: "Control Loop", icon: Activity },
+  { to: "/whatif", label: "Control Loop", icon: Activity },
+  { to: "/transfer", label: "Cooling Transfer", icon: ArrowLeftRight },
   { to: "/model", label: "Surrogate Model", icon: BrainCircuit },
+  { to: "/master", label: "Master Data", icon: Database },
 ] as const;
 
 function NavItems({ onNavigate }: { onNavigate?: () => void }) {

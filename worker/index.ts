@@ -5,6 +5,7 @@ import {
   facilityConfig,
   modelMetrics,
   powerTransfers,
+  shadowSamples,
   telemetrySamples,
   whatifCandidates,
   whatifRuns,
@@ -13,6 +14,7 @@ import {
 import { driftSeries, MODEL_CARD } from "../src/lib/twin/modelMeta";
 import { runWhatIf, type WhatIfRequest } from "../src/lib/twin/optimizer";
 import { tickTelemetry } from "../src/lib/twin/simulator";
+import { forecastZone } from "../src/lib/twin/forecast";
 import {
   applySlewLimits,
   evaluateGuardrails,
@@ -26,16 +28,18 @@ import {
   zoneStatus,
   type ControlAction,
   type FacilityView,
+  type ForecastHorizon,
   type Setpoints,
   type Telemetry,
   type WhatIfCandidate,
+  type ZoneForecast,
   type ZoneSpec,
   type ZoneView,
 } from "../src/lib/twin/types";
 
 type Env = CloudflareDatabaseEnv;
 
-const WATCHDOG_TIMEOUT_SEC = 30;
+const WATCHDOG_TIMEOUT_SEC = 90;
 
 const DEFAULT_ZONES = [
   { id: 1, name: "Zone A", baseLoadMw: 5.5, loadAmpMw: 2.0, loadPhaseH: 9, wetBulbOffsetC: 0 },
@@ -145,7 +149,22 @@ function buildZoneView(zone: ZoneRow, telemetry: Telemetry, setpoints = parseSet
       powerPct: round((prediction.accessoryPowerMw / zone.powerBudgetMw) * 100, 1),
     },
     margin,
+    forecast: forecastZone(zoneSpec(zone), telemetry, setpoints),
   };
+}
+
+function facilityForecast(views: ZoneView[]): ZoneForecast {
+  const horizons: ForecastHorizon[] = ["15m", "1h", "4h", "24h"];
+  const out = {} as ZoneForecast;
+  for (const h of horizons) {
+    out[h] = {
+      peakChipTempC: Math.max(...views.map((v) => v.forecast[h].peakChipTempC)),
+      peakAtTicks: Math.min(...views.map((v) => v.forecast[h].peakAtTicks)),
+      worstMargin: Math.min(...views.map((v) => v.forecast[h].worstMargin)),
+      rising: views.some((v) => v.forecast[h].rising),
+    };
+  }
+  return out;
 }
 
 function buildFacility(views: ZoneView[], facility: (typeof facilityConfig.$inferSelect)): FacilityView {
@@ -170,6 +189,7 @@ function buildFacility(views: ZoneView[], facility: (typeof facilityConfig.$infe
       waterPct: round((water / facility.totalWaterBudgetLpm) * 100, 1),
       powerPct: round((accessory / facility.totalPowerBudgetMw) * 100, 1),
     },
+    forecast: facilityForecast(views),
   };
 }
 
@@ -266,6 +286,7 @@ async function controlSnapshot(env: Env) {
         heartbeatAgeSec,
         watchdogTimeoutSec: WATCHDOG_TIMEOUT_SEC,
         currentSetpoints: current,
+        shadowSetpoints: z.shadowSetpoints ? parseSetpoints(z.shadowSetpoints) : null,
         effectiveSetpoints: failSafe ? factorySetpoints() : current,
         factorySetpoints: FACTORY_SETPOINTS,
         slewLimits: SLEW_LIMITS,
@@ -292,6 +313,68 @@ async function controlSnapshot(env: Env) {
   };
 }
 
+async function advanceSimulation(env: Env) {
+  const db = getDb(env);
+  const allZones = await listZones(env);
+  const nextTick = (await getMaxTick(env)) + 1;
+  const now = new Date().toISOString();
+  const quality = { outliersRemoved: 0, driftFlags: [] as string[], imputedCount: 0 };
+  const views: ZoneView[] = [];
+  for (const z of allZones) {
+    const prev = await latestTelemetryForZone(env, z);
+    const steered = await steerZone(env, z, prev);
+    const { telemetry, quality: q } = tickTelemetry(prev, nextTick, steered, zoneSpec(z));
+    const prediction = predict(telemetry, steered);
+    await db.insert(telemetrySamples).values({
+      clusterId: z.id,
+      tick: nextTick,
+      payload: JSON.stringify(telemetry),
+      pue: prediction.pue,
+      wue: prediction.wue,
+    });
+    // Shadow validation: score the fixed shadow config against live telemetry.
+    if (z.shadowSetpoints) {
+      const shadowSetpoints = parseSetpoints(z.shadowSetpoints);
+      const sp = predict(telemetry, shadowSetpoints);
+      const sg = evaluateGuardrails(sp);
+      const budgetOk =
+        sp.flowLpm <= z.waterBudgetLpm && sp.accessoryPowerMw <= z.powerBudgetMw;
+      const meetsTarget =
+        Math.abs(sp.pue - z.targetPue) <= 0.02 && Math.abs(sp.wue - z.targetWue) <= 0.02;
+      await db.insert(shadowSamples).values({
+        clusterId: z.id,
+        tick: nextTick,
+        setpoints: JSON.stringify(shadowSetpoints),
+        predictedPue: sp.pue,
+        predictedWue: sp.wue,
+        actualPue: prediction.pue,
+        actualWue: prediction.wue,
+        chipTempC: sp.chipTempC,
+        feasible: sg.feasible ? 1 : 0,
+        budgetOk: budgetOk ? 1 : 0,
+        meetsTarget: meetsTarget ? 1 : 0,
+      });
+    }
+    quality.outliersRemoved += q.outliersRemoved;
+    quality.imputedCount += q.imputedCount;
+    quality.driftFlags.push(...q.driftFlags.map((f) => `${z.name}: ${f}`));
+    views.push(buildZoneView(z, telemetry, steered));
+  }
+  // Feed the watchdog so it doesn't fail-safe while idle.
+  await db
+    .update(zones)
+    .set({ lastHeartbeat: now, commsOk: 1, failSafeActive: 0 })
+    .where(eq(zones.id, zones.id));
+  await db
+    .delete(telemetrySamples)
+    .where(lt(telemetrySamples.tick, nextTick - 1008));
+  await db
+    .delete(shadowSamples)
+    .where(lt(shadowSamples.tick, nextTick - 1008));
+  const facility = await getFacility(env);
+  return { aggregate: buildFacility(views, facility), zones: views, quality };
+}
+
 async function handleApi(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
@@ -313,51 +396,42 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/api/telemetry/tick" && method === "POST") {
-    const allZones = await listZones(env);
-    const nextTick = (await getMaxTick(env)) + 1;
-    const quality = { outliersRemoved: 0, driftFlags: [] as string[], imputedCount: 0 };
-    const views: ZoneView[] = [];
-    for (const z of allZones) {
-      const prev = await latestTelemetryForZone(env, z);
-      const steered = await steerZone(env, z, prev);
-      const { telemetry, quality: q } = tickTelemetry(prev, nextTick, steered, zoneSpec(z));
-      const prediction = predict(telemetry, steered);
-      await db.insert(telemetrySamples).values({
-        clusterId: z.id,
-        tick: nextTick,
-        payload: JSON.stringify(telemetry),
-        pue: prediction.pue,
-        wue: prediction.wue,
-      });
-      quality.outliersRemoved += q.outliersRemoved;
-      quality.imputedCount += q.imputedCount;
-      quality.driftFlags.push(...q.driftFlags.map((f) => `${z.name}: ${f}`));
-      views.push(buildZoneView(z, telemetry, steered));
-    }
-    await db
-      .delete(telemetrySamples)
-      .where(lt(telemetrySamples.tick, nextTick - 200));
-    const facility = await getFacility(env);
-    return json({ aggregate: buildFacility(views, facility), zones: views, quality });
+    return json(await advanceSimulation(env));
   }
 
-  // --- What-If counterfactual engine (global) ------------------------------
+  // --- What-If counterfactual engine ----------------------------------------
   if (path === "/api/whatif" && method === "POST") {
-    const body = await readBody<WhatIfRequest>(request);
+    const body = await readBody<WhatIfRequest & { zoneId?: number }>(request);
     if (!body || typeof body.alpha !== "number" || typeof body.beta !== "number") {
       return json({ error: "alpha and beta weights are required." }, 400);
     }
     const alpha = Math.min(1, Math.max(0, body.alpha));
     const beta = Math.min(1, Math.max(0, body.beta));
-    const result = runWhatIf({ ...body, alpha, beta });
+
+    // Per-zone run: live telemetry as context defaults, zone setpoints as base.
+    let zone: ZoneRow | undefined;
+    if (body.zoneId != null) {
+      const allZones = await listZones(env);
+      zone = allZones.find((z) => z.id === body.zoneId);
+      if (!zone) return json({ error: "Zone not found." }, 404);
+    }
+    const telemetry = zone ? await latestTelemetryForZone(env, zone) : null;
+    const result = runWhatIf({
+      alpha,
+      beta,
+      baseSetpoints: zone ? parseSetpoints(zone.currentSetpoints) : body.baseSetpoints,
+      itLoadMw: body.itLoadMw ?? telemetry?.itLoadMw,
+      wetBulbC: body.wetBulbC ?? telemetry?.wetBulbC,
+    });
     const best = result.best;
 
     const inserted = await db
       .insert(whatifRuns)
       .values({
+        zoneId: zone ? zone.id : null,
         alpha,
         beta,
-        baseSetpoints: JSON.stringify(body.baseSetpoints ?? FACTORY_SETPOINTS),
+        baseSetpoints: JSON.stringify(zone ? parseSetpoints(zone.currentSetpoints) : (body.baseSetpoints ?? FACTORY_SETPOINTS)),
         bestSetpoints: best ? JSON.stringify(best.setpoints) : null,
         bestCost: best ? best.cost : null,
         bestPue: best ? best.pue : null,
@@ -385,6 +459,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
     return json({
       runId,
+      zoneId: zone ? zone.id : null,
       alpha,
       beta,
       evaluated: result.evaluated,
@@ -400,6 +475,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       runs: rows.map((r) => ({
         id: r.id,
         createdAt: r.createdAt,
+        zoneId: r.zoneId,
         alpha: r.alpha,
         beta: r.beta,
         bestPue: r.bestPue,
@@ -442,6 +518,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     return json({
       runId: r.id,
       createdAt: r.createdAt,
+      zoneId: r.zoneId,
       alpha: r.alpha,
       beta: r.beta,
       baseSetpoints: parseSetpoints(r.baseSetpoints),
@@ -504,30 +581,107 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     return json({ ok: true });
   }
 
-  // --- Per-zone sandbox ----------------------------------------------------
-  const optimizeMatch = path.match(/^\/api\/zones\/(\d+)\/optimize$/);
-  if (optimizeMatch && method === "POST") {
-    const id = Number(optimizeMatch[1]);
+  // --- Shadow validation ----------------------------------------------------
+  if (path === "/api/control/applyShadow" && method === "POST") {
+    const body = await readBody<{ clusterId?: number; setpoints?: Setpoints }>(request);
+    if (!body?.clusterId || !body.setpoints) {
+      return json({ error: "clusterId and setpoints are required." }, 400);
+    }
+    const allZones = await listZones(env);
+    const zone = allZones.find((z) => z.id === body.clusterId);
+    if (!zone) return json({ error: "Zone not found." }, 404);
+    const telemetry = await latestTelemetryForZone(env, zone);
+    const prediction = predict(telemetry, body.setpoints);
+    const guard = evaluateGuardrails(prediction);
+    if (!guard.feasible) {
+      return json(
+        { error: "Requested setpoints violate hard guardrails.", violations: guard.violations },
+        422,
+      );
+    }
+    if (prediction.flowLpm > zone.waterBudgetLpm || prediction.accessoryPowerMw > zone.powerBudgetMw) {
+      return json({ error: "Requested setpoints exceed the zone's water/power budget." }, 422);
+    }
+    await db
+      .update(zones)
+      .set({ shadowSetpoints: JSON.stringify(body.setpoints), updatedAt: new Date().toISOString() })
+      .where(eq(zones.id, zone.id));
+    // Fresh validation run: clear old samples and log an immediate sample + action.
+    await db.delete(shadowSamples).where(eq(shadowSamples.clusterId, zone.id));
+    const budgetOk =
+      prediction.flowLpm <= zone.waterBudgetLpm && prediction.accessoryPowerMw <= zone.powerBudgetMw;
+    const meetsTarget =
+      Math.abs(prediction.pue - zone.targetPue) <= 0.02 && Math.abs(prediction.wue - zone.targetWue) <= 0.02;
+    await db.insert(shadowSamples).values({
+      clusterId: zone.id,
+      tick: telemetry.tick,
+      setpoints: JSON.stringify(body.setpoints),
+      predictedPue: prediction.pue,
+      predictedWue: prediction.wue,
+      actualPue: predict(telemetry, parseSetpoints(zone.currentSetpoints)).pue,
+      actualWue: predict(telemetry, parseSetpoints(zone.currentSetpoints)).wue,
+      chipTempC: prediction.chipTempC,
+      feasible: 1,
+      budgetOk: budgetOk ? 1 : 0,
+      meetsTarget: meetsTarget ? 1 : 0,
+    });
+    await db.insert(controlActions).values({
+      clusterId: zone.id,
+      mode: zone.mode,
+      kind: "would_be",
+      setpoints: JSON.stringify(body.setpoints),
+      note: "Shadow config set",
+    });
+    return json({ ok: true, shadowSetpoints: body.setpoints });
+  }
+
+  const validationMatch = path.match(/^\/api\/zones\/(\d+)\/validation$/);
+  if (validationMatch && method === "GET") {
+    const id = Number(validationMatch[1]);
     const allZones = await listZones(env);
     const zone = allZones.find((z) => z.id === id);
     if (!zone) return json({ error: "Zone not found." }, 404);
-    const telemetry = await latestTelemetryForZone(env, zone);
-    const body = await readBody<{ alpha?: number; beta?: number }>(request);
-    const alpha = clamp(body?.alpha ?? 0.7, 0, 1);
-    const beta = clamp(body?.beta ?? 0.3, 0, 1);
-    const result = runWhatIf({
-      alpha,
-      beta,
-      itLoadMw: telemetry.itLoadMw,
-      wetBulbC: telemetry.wetBulbC,
-      baseSetpoints: parseSetpoints(zone.currentSetpoints),
-    });
+    const rows = await db
+      .select()
+      .from(shadowSamples)
+      .where(eq(shadowSamples.clusterId, id))
+      .orderBy(desc(shadowSamples.id))
+      .limit(1008);
+    const total = rows.length;
+    const feasible = rows.filter((r) => r.feasible === 1).length;
+    const budgetOk = rows.filter((r) => r.budgetOk === 1).length;
+    const meets = rows.filter((r) => r.meetsTarget === 1).length;
+    const avgPueGap = total
+      ? rows.reduce((s, r) => s + Math.max(0, r.predictedPue - zone.targetPue), 0) / total
+      : 0;
+    const feasibleRate = total ? feasible / total : 0;
+    const meetsRate = total ? meets / total : 0;
     return json({
       zoneId: id,
-      baseline: predict(telemetry, parseSetpoints(zone.currentSetpoints)),
-      candidates: result.candidates.slice(0, 15),
-      best: result.best,
-      feasibleCount: result.feasibleCount,
+      hasShadowConfig: zone.shadowSetpoints != null,
+      shadowSetpoints: zone.shadowSetpoints ? parseSetpoints(zone.shadowSetpoints) : null,
+      total,
+      feasible,
+      budgetOk,
+      meets,
+      feasibleRate: round(feasibleRate, 3),
+      meetsRate: round(meetsRate, 3),
+      avgPueGap: round(avgPueGap, 4),
+      ready: feasibleRate >= 0.95 && meetsRate >= 0.9,
+      samples: rows
+        .slice()
+        .reverse()
+        .map((r) => ({
+          tick: r.tick,
+          predictedPue: r.predictedPue,
+          predictedWue: r.predictedWue,
+          actualPue: r.actualPue,
+          actualWue: r.actualWue,
+          chipTempC: r.chipTempC,
+          feasible: r.feasible === 1,
+          budgetOk: r.budgetOk === 1,
+          meetsTarget: r.meetsTarget === 1,
+        })),
     });
   }
 
@@ -542,10 +696,32 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     if (body.mode !== "shadow" && body.mode !== "closed_loop") {
       return json({ error: "mode must be 'shadow' or 'closed_loop'." }, 400);
     }
-    await db
-      .update(zones)
-      .set({ mode: body.mode, updatedAt: new Date().toISOString() })
-      .where(eq(zones.id, body.clusterId));
+    const allZones = await listZones(env);
+    const zone = allZones.find((z) => z.id === body.clusterId);
+    if (!zone) return json({ error: "Zone not found." }, 404);
+    // Flip to closed-loop: apply the validated shadow config (if any) as the starting real config.
+    if (body.mode === "closed_loop" && zone.shadowSetpoints) {
+      await db
+        .update(zones)
+        .set({
+          mode: body.mode,
+          currentSetpoints: zone.shadowSetpoints,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(zones.id, body.clusterId));
+      await db.insert(controlActions).values({
+        clusterId: body.clusterId,
+        mode: body.mode,
+        kind: "applied",
+        setpoints: zone.shadowSetpoints,
+        note: "Closed-loop enabled — validated shadow config applied",
+      });
+    } else {
+      await db
+        .update(zones)
+        .set({ mode: body.mode, updatedAt: new Date().toISOString() })
+        .where(eq(zones.id, body.clusterId));
+    }
     return json(await controlSnapshot(env));
   }
 
@@ -596,7 +772,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const now = new Date().toISOString();
     await db
       .update(zones)
-      .set({ lastHeartbeat: now, commsOk: 1, failSafeActive: 0, updatedAt: now })
+      .set({ lastHeartbeat: now, commsOk: 1, failSafeActive: 0 })
       .where(eq(zones.id, zones.id));
     return json({ ok: true });
   }
@@ -774,5 +950,8 @@ export default {
       }
     }
     return new Response(null, { status: 404 });
+  },
+  async scheduled(_event, env, ctx) {
+    ctx.waitUntil(advanceSimulation(env));
   },
 } satisfies ExportedHandler<Env>;

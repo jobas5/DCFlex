@@ -1,11 +1,12 @@
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { controlRoute } from "./routes/control";
+import { masterDataRoute } from "./routes/masterData";
 import { modelRoute } from "./routes/model";
 import { notFoundRoute } from "./routes/notFound";
 import { overviewRoute } from "./routes/overview";
 import { rootRoute } from "./routes/root";
+import { transferRoute } from "./routes/transfer";
 import { whatifRoute } from "./routes/whatif";
 import { whatifDetailRoute } from "./routes/whatifDetail";
 import "./styles.css";
@@ -14,8 +15,9 @@ const routeTree = rootRoute.addChildren([
   overviewRoute,
   whatifRoute,
   whatifDetailRoute,
-  controlRoute,
+  transferRoute,
   modelRoute,
+  masterDataRoute,
   notFoundRoute,
 ]);
 

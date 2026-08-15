@@ -15,8 +15,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "../components/Toast";
 import { ErrorState, KpiCard, Panel, StatusBadge } from "../components/ui";
 import { api, type TickResponse } from "../lib/api";
-import { GUARDRAILS, type FacilityView, type ZoneView } from "../lib/twin/types";
+import { GUARDRAILS, type FacilityView, type ForecastHorizon, type ForecastPoint, type ZoneView } from "../lib/twin/types";
 import { rootRoute } from "./root";
+
+const HORIZONS: ForecastHorizon[] = ["15m", "1h", "4h", "24h"];
+
+const peakWhen = (f: ForecastPoint) => {
+  const mins = f.peakAtTicks * 10;
+  return mins < 60 ? `~${mins} min` : `~${(mins / 60).toFixed(1)}h`;
+};
 
 const zoneCardStyle: Record<ZoneView["status"], string> = {
   green: "border-emerald-500/50 hover:bg-emerald-500/10",
@@ -190,9 +197,10 @@ function FacilityDetail({ aggregate, zones }: { aggregate: FacilityView; zones: 
   );
 }
 
-function ZoneDetail({ zone }: { zone: ZoneView }) {
+function ZoneDetail({ zone, horizon }: { zone: ZoneView; horizon: ForecastHorizon }) {
   const pueGap = zone.prediction.pue - zone.targets.pue;
   const wueGap = zone.prediction.wue - zone.targets.wue;
+  const f = zone.forecast[horizon];
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -210,6 +218,27 @@ function ZoneDetail({ zone }: { zone: ZoneView }) {
         />
         <KpiCard label="Chip temp" value={zone.prediction.chipTempC.toFixed(1)} unit="°C" icon={Thermometer} tone={statusTone[zone.status]} />
       </div>
+
+      <Panel title={`Heat forecast — next ${horizon}`}>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <LoopStat
+            label="Peak chip temp"
+            value={`${f.peakChipTempC.toFixed(0)}°C`}
+            ok={f.peakChipTempC < 85}
+          />
+          <LoopStat
+            label="Worst margin"
+            value={`${f.worstMargin.toFixed(1)}°C`}
+            ok={f.worstMargin >= 5}
+          />
+          <LoopStat label="Peaks in" value={peakWhen(f)} />
+        </div>
+        <p className="mt-2 text-xs text-slate-400">
+          {f.rising
+            ? "Heat is forecast to rise over this window — plan extra cooling or a transfer."
+            : "Heat is forecast to stay level or fall over this window."}
+        </p>
+      </Panel>
 
       <Panel title="Loop & setpoints">
         <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
@@ -251,8 +280,8 @@ function ZoneDetail({ zone }: { zone: ZoneView }) {
       {zone.status === "red" ? (
         <div className="rounded-lg border border-red-500/40 bg-red-950/20 p-3 text-sm">
           <p className="font-medium text-red-300">{zone.name} needs more cooling.</p>
-          <Link to="/control" className="mt-1 inline-block text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400">
-            Open Control to transfer cooling to this zone →
+          <Link to="/transfer" className="mt-1 inline-block text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400">
+            Open Cooling Transfer for this zone →
           </Link>
         </div>
       ) : null}
@@ -288,14 +317,55 @@ function LoopStat({ label, value, ok, icon }: { label: string; value: string; ok
   );
 }
 
+function ForecastAlert({
+  zones,
+  horizon,
+}: {
+  zones: ZoneView[];
+  horizon: ForecastHorizon;
+}) {
+  const red = zones.filter((z) => z.forecast[horizon].worstMargin < 3);
+  const amber = zones.filter((z) => {
+    const m = z.forecast[horizon].worstMargin;
+    return m >= 3 && m < 5;
+  });
+
+  if (red.length) {
+    return (
+      <div className="rounded-lg border border-red-500/50 bg-red-950/30 p-3 text-sm" role="alert">
+        <p className="font-medium text-red-300">
+          Heat forecast — act now:{" "}
+          {red.map((z) => `${z.name} peaks at ${z.forecast[horizon].peakChipTempC.toFixed(0)}°C in ${peakWhen(z.forecast[horizon])}`).join(" · ")}
+        </p>
+        <Link to="/transfer" className="mt-1 inline-block text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400">
+          Transfer cooling to a hot zone →
+        </Link>
+      </div>
+    );
+  }
+  if (amber.length) {
+    return (
+      <div className="rounded-lg border border-amber-500/50 bg-amber-950/30 p-3 text-sm" role="alert">
+        <p className="font-medium text-amber-300">
+          Plan cooling:{" "}
+          {amber.map((z) => `${z.name} heat rising, peak ${z.forecast[horizon].peakChipTempC.toFixed(0)}°C in ${peakWhen(z.forecast[horizon])}`).join(" · ")}
+        </p>
+      </div>
+    );
+  }
+  return null;
+}
+
 function OverviewPage() {
   const toast = useToast();
   const [latest, setLatest] = useState<TickResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [selectedId, setSelectedId] = useState<number | "facility">("facility");
+  const [horizon, setHorizon] = useState<ForecastHorizon>("1h");
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+  const alertedRef = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     try {
@@ -313,19 +383,24 @@ function OverviewPage() {
   useEffect(() => {
     const id = setInterval(async () => {
       if (pausedRef.current) return;
-      try {
-        const tick = await api.telemetryTick();
-        setLatest(tick);
-        if (tick.quality.driftFlags.length) {
-          toast(`Sensor drift detected: ${tick.quality.driftFlags[0]}`, "warning");
-        }
-        setError(null);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Telemetry stream failed.");
-      }
+      await load();
     }, 5000);
     return () => clearInterval(id);
-  }, [toast]);
+  }, [load]);
+
+  useEffect(() => {
+    if (!latest) return;
+    const atRisk = latest.zones.filter((z) => z.forecast[horizon].worstMargin < 5);
+    for (const z of atRisk) {
+      const key = `${z.id}:${horizon}`;
+      if (alertedRef.current.has(key)) continue;
+      alertedRef.current.add(key);
+      toast(
+        `${z.name}: heat forecast to peak at ${z.forecast[horizon].peakChipTempC.toFixed(0)}°C in ${peakWhen(z.forecast[horizon])}.`,
+        z.forecast[horizon].worstMargin < 3 ? "error" : "warning",
+      );
+    }
+  }, [latest, horizon, toast]);
 
   if (error && !latest) return <ErrorState message={error} onRetry={() => void load()} />;
   if (!latest) return <p className="py-20 text-center text-sm text-slate-400">Connecting to digital twin…</p>;
@@ -338,12 +413,23 @@ function OverviewPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SummaryCard aggregate={aggregate} />
       </div>
-      {error ? (
-        <p className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-sm text-amber-300" role="alert">
-          Stream interrupted: {error} — retrying automatically.
-        </p>
-      ) : null}
-      <div className="flex flex-wrap items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1 text-xs text-slate-400">
+          <span className="mr-1">Heat forecast:</span>
+          {HORIZONS.map((h) => (
+            <button
+              key={h}
+              type="button"
+              onClick={() => setHorizon(h)}
+              aria-pressed={horizon === h}
+              className={`rounded-md border px-2 py-1 text-xs focus-visible:outline-2 focus-visible:outline-cyan-400 ${
+                horizon === h ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 text-slate-400 hover:bg-slate-800"
+              }`}
+            >
+              {h}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           onClick={() => setPaused((v) => !v)}
@@ -354,6 +440,12 @@ function OverviewPage() {
           {paused ? "Resume stream" : "Pause stream"}
         </button>
       </div>
+      <ForecastAlert zones={zones} horizon={horizon} />
+      {error ? (
+        <p className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-sm text-amber-300" role="alert">
+          Stream interrupted: {error} — retrying automatically.
+        </p>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
         <aside className="space-y-2" aria-label="Cooling zones">
@@ -382,7 +474,7 @@ function OverviewPage() {
 
         <section aria-label="Detail">
           {selected ? (
-            <ZoneDetail zone={selected} />
+            <ZoneDetail zone={selected} horizon={horizon} />
           ) : (
             <FacilityDetail aggregate={aggregate} zones={zones} />
           )}
