@@ -1,4 +1,4 @@
-# Data Center Liquid Cooling Optimizer
+# DCFlex
 
 A monitoring and optimization dashboard — a physics-guided digital twin — for high-density liquid-cooled data centers, balancing thermal safety, PUE (energy efficiency), and WUE (water efficiency). All telemetry is simulated by a seeded, deterministic generator, so no physical BMS/CDU hardware is required.
 

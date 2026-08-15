@@ -29,7 +29,16 @@ export function LineChart({
   ariaLabel,
 }: LineChartProps) {
   const [hover, setHover] = useState<number | null>(null);
+  const [hidden, setHidden] = useState<Set<number>>(new Set());
   const H = height;
+
+  const toggleSeries = (i: number) =>
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
 
   const { minY, maxY, paths } = useMemo(() => {
     const all = series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
@@ -131,9 +140,11 @@ export function LineChart({
             </text>
           </g>
         ) : null}
-        {paths.map((d, i) => (
-          <path key={i} d={d} fill="none" stroke={series[i].color} strokeWidth="2" />
-        ))}
+        {paths.map((d, i) =>
+          !hidden.has(i) ? (
+            <path key={i} d={d} fill="none" stroke={series[i].color} strokeWidth="2" />
+          ) : null,
+        )}
         {labels && n > 1
           ? [0, Math.floor((n - 1) / 2), n - 1].map((idx) => (
               <text
@@ -162,19 +173,27 @@ export function LineChart({
       {hover !== null && n > 1 ? (
         <div className="pointer-events-none absolute right-2 top-2 rounded-md border border-slate-600 bg-slate-900/95 px-2 py-1 text-xs shadow-lg">
           {labels?.[hover] ? <p className="mb-0.5 text-slate-400">{labels[hover]}</p> : null}
-          {series.map((s, i) => (
-            <p key={i} className="font-mono" style={{ color: s.color }}>
-              {s.label}: {yFormat(s.values[hover])}
-            </p>
-          ))}
+          {series.map((s, i) =>
+            !hidden.has(i) ? (
+              <p key={i} className="font-mono" style={{ color: s.color }}>
+                {s.label}: {yFormat(s.values[hover])}
+              </p>
+            ) : null,
+          )}
         </div>
       ) : null}
       <div className="mt-1 flex flex-wrap gap-3">
         {series.map((s, i) => (
-          <span key={i} className="flex items-center gap-1.5 text-xs text-slate-400">
+          <button
+            key={i}
+            type="button"
+            onClick={() => toggleSeries(i)}
+            aria-pressed={!hidden.has(i)}
+            className={`flex items-center gap-1.5 text-xs text-slate-400 focus-visible:outline-2 focus-visible:outline-cyan-400 ${hidden.has(i) ? "opacity-40" : ""}`}
+          >
             <span className="h-2 w-2 rounded-full" style={{ background: s.color }} aria-hidden />
             {s.label}
-          </span>
+          </button>
         ))}
       </div>
     </div>

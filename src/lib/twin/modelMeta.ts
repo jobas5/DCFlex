@@ -3,7 +3,7 @@ import { predict } from "./surrogate";
 import type { Setpoints } from "./types";
 
 export const MODEL_CARD = {
-  name: "dc-cooling-surrogate",
+  name: "dcflex-surrogate",
   version: "1.4.2",
   algorithm: "LightGBM (monotonicity-constrained gradient boosting)",
   exportedFormat: "ONNX 1.17 (opset 18) — onnxruntime-web inference",

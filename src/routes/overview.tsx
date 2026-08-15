@@ -4,17 +4,19 @@ import {
   Cpu,
   Droplets,
   Gauge as GaugeIcon,
-  Pause,
-  Play,
   Thermometer,
   Waves,
   Wind,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useToast } from "../components/Toast";
-import { ErrorState, KpiCard, Panel, StatusBadge } from "../components/ui";
-import { api, type TelemetryCurrentResponse } from "../lib/api";
+import { LineChart } from "../components/LineChart";
+import { KpiCard, Panel, StatusBadge } from "../components/ui";
+import { api, type HistoryPoint } from "../lib/api";
+import { useSim } from "../lib/simContext";
+import { fmtTime } from "../lib/time";
+import { CHART } from "../lib/tokens";
 import { GUARDRAILS, type FacilityView, type ForecastHorizon, type ForecastPoint, type ZoneView } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
@@ -295,7 +297,7 @@ function TargetStat({ label, value, target, over }: { label: string; value: stri
       <p className="text-xs text-slate-400">{label}</p>
       <p className="mt-0.5 font-mono text-base tabular-nums">
         {value}
-        <span className="ml-1.5 text-xs text-slate-500">/ {target}</span>
+        <span className="ml-1.5 text-xs text-slate-400">/ {target}</span>
       </p>
       <p className={`text-xs ${over ? "text-amber-300" : "text-emerald-300"}`}>{over ? "over target" : "within target"}</p>
     </div>
@@ -358,35 +360,24 @@ function ForecastAlert({
 
 function OverviewPage() {
   const toast = useToast();
-  const [latest, setLatest] = useState<TelemetryCurrentResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [paused, setPaused] = useState(false);
+  const { data: latest } = useSim();
   const [selectedId, setSelectedId] = useState<number | "facility">("facility");
   const [horizon, setHorizon] = useState<ForecastHorizon>("1h");
-  const pausedRef = useRef(paused);
-  pausedRef.current = paused;
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const alertedRef = useRef<Set<string>>(new Set());
 
-  const load = useCallback(async () => {
-    try {
-      setLatest(await api.telemetryCurrent());
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load telemetry.");
-    }
-  }, []);
-
   useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    const id = setInterval(async () => {
-      if (pausedRef.current) return;
-      await load();
-    }, 5000);
+    const loadHistory = async () => {
+      try {
+        setHistory((await api.telemetryHistory(undefined, 96)).history);
+      } catch {
+        /* ignore */
+      }
+    };
+    void loadHistory();
+    const id = setInterval(() => void loadHistory(), 15000);
     return () => clearInterval(id);
-  }, [load]);
+  }, []);
 
   useEffect(() => {
     if (!latest) return;
@@ -402,17 +393,46 @@ function OverviewPage() {
     }
   }, [latest, horizon, toast]);
 
-  if (error && !latest) return <ErrorState message={error} onRetry={() => void load()} />;
   if (!latest) return <p className="py-20 text-center text-sm text-slate-400">Connecting to digital twin…</p>;
 
   const { aggregate, zones } = latest;
   const selected = selectedId === "facility" ? null : zones.find((z) => z.id === selectedId) ?? null;
+  const historyLabels = history.map((h) => fmtTime(h.timestamp));
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SummaryCard aggregate={aggregate} />
       </div>
+
+      {history.length > 2 ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Panel title="PUE & WUE trend">
+            <LineChart
+              ariaLabel="PUE and WUE trend over recent intervals"
+              labels={historyLabels}
+              series={[
+                { label: "PUE", color: CHART.cyan, values: history.map((h) => h.pue) },
+                { label: "WUE (L/kWh)", color: CHART.emerald, values: history.map((h) => h.wue) },
+              ]}
+              yFormat={(v) => v.toFixed(3)}
+            />
+          </Panel>
+          <Panel title="Die temperatures vs limit">
+            <LineChart
+              ariaLabel="GPU and CPU die temperatures against the 85 degree limit"
+              labels={historyLabels}
+              series={[
+                { label: "GPU die", color: CHART.pink, values: history.map((h) => h.gpuDieC) },
+                { label: "CPU die", color: CHART.purple, values: history.map((h) => h.cpuDieC) },
+              ]}
+              yFormat={(v) => `${v.toFixed(0)}°C`}
+              threshold={{ value: GUARDRAILS.chipTempMaxC, label: "85°C limit", color: "#f87171" }}
+            />
+          </Panel>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1 text-xs text-slate-400">
           <span className="mr-1">Heat forecast:</span>
@@ -430,22 +450,8 @@ function OverviewPage() {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() => setPaused((v) => !v)}
-          aria-pressed={paused}
-          className="inline-flex items-center gap-2 rounded-lg border border-cyan-500/50 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 focus-visible:outline-2 focus-visible:outline-cyan-400"
-        >
-          {paused ? <Play className="h-4 w-4" aria-hidden /> : <Pause className="h-4 w-4" aria-hidden />}
-          {paused ? "Resume stream" : "Pause stream"}
-        </button>
       </div>
       <ForecastAlert zones={zones} horizon={horizon} />
-      {error ? (
-        <p className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-sm text-amber-300" role="alert">
-          Stream interrupted: {error} — retrying automatically.
-        </p>
-      ) : null}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_1fr]">
         <aside className="space-y-2" aria-label="Cooling zones">

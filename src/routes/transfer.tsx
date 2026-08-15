@@ -2,27 +2,21 @@ import { createRoute } from "@tanstack/react-router";
 import { ArrowRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useToast } from "../components/Toast";
-import { Panel, StatusBadge } from "../components/ui";
+import { ConfirmDialog, KindBadge, Panel, StatusBadge, StatusDot } from "../components/ui";
 import { api, type TransferListItem, type TransferResponse } from "../lib/api";
 import { rootRoute } from "./root";
 
-const kindBadge = (kind: string) =>
-  kind === "applied" ? (
-    <StatusBadge tone="good">applied</StatusBadge>
-  ) : kind === "fail_safe" ? (
-    <StatusBadge tone="bad">fail-safe</StatusBadge>
-  ) : (
-    <StatusBadge tone="info">would-be</StatusBadge>
-  );
+type ZoneStatus = "green" | "yellow" | "red";
 
 function TransferPage() {
   const toast = useToast();
-  const [zones, setZones] = useState<{ id: number; name: string; flowLpm: number; chillerMw: number; chipTempC: number }[]>([]);
-  const [sourceId, setSourceId] = useState<number | "">("");
-  const [targetId, setTargetId] = useState<number | "">("");
+  const [zones, setZones] = useState<{ id: number; name: string; flowLpm: number; chillerMw: number; chipTempC: number; status: ZoneStatus }[]>([]);
+  const [sourceId, setSourceId] = useState<number | null>(null);
+  const [targetId, setTargetId] = useState<number | null>(null);
   const [waterDelta, setWaterDelta] = useState(0);
   const [powerDelta, setPowerDelta] = useState(0);
   const [active, setActive] = useState<TransferResponse | null>(null);
+  const [confirmApply, setConfirmApply] = useState(false);
   const [history, setHistory] = useState<TransferListItem[]>([]);
 
   const loadZones = useCallback(async () => {
@@ -35,6 +29,7 @@ function TransferPage() {
           flowLpm: z.prediction.flowLpm,
           chillerMw: z.prediction.chillerPowerMw,
           chipTempC: z.prediction.chipTempC,
+          status: z.status,
         })),
       );
     } catch {
@@ -66,7 +61,7 @@ function TransferPage() {
       return;
     }
     try {
-      const res = await api.createTransfer({ sourceId: Number(sourceId), targetId: Number(targetId), waterDeltaLpm: waterDelta, powerDeltaMw: powerDelta });
+      const res = await api.createTransfer({ sourceId, targetId, waterDeltaLpm: waterDelta, powerDeltaMw: powerDelta });
       setActive(res);
       toast(res.feasible ? "Transfer proposed (shadow)." : "Transfer infeasible — check guardrails.", res.feasible ? "success" : "warning");
       void loadHistory();
@@ -81,6 +76,7 @@ function TransferPage() {
       await api.transitionTransfer(active.id, action);
       toast(`Transfer ${action === "reject" ? "rejected" : action + "d"}.`, "success");
       setActive(null);
+      setConfirmApply(false);
       void loadHistory();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Transition failed.", "error");
@@ -97,47 +93,63 @@ function TransferPage() {
       </div>
 
       <Panel title="Reallocate water / power between zones">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block text-sm">
-            <span className="text-slate-400">Source (safe zone)</span>
-            <select
-              value={String(sourceId)}
-              onChange={(e) => setSourceId(e.target.value === "" ? "" : Number(e.target.value))}
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-cyan-400"
-            >
-              <option value="">—</option>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <p className="mb-2 text-sm text-slate-400">Source (safe zone)</p>
+            <div className="grid grid-cols-2 gap-2">
               {zones.map((z) => (
-                <option key={z.id} value={z.id} disabled={z.id === targetId}>
-                  {z.name} · flow {Math.round(z.flowLpm)} L/min
-                </option>
+                <button
+                  key={z.id}
+                  type="button"
+                  onClick={() => setSourceId(z.id === sourceId ? null : z.id)}
+                  aria-pressed={sourceId === z.id}
+                  disabled={z.id === targetId}
+                  className={`rounded-lg border p-2.5 text-left text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40 ${
+                    sourceId === z.id ? "border-cyan-400/60 bg-cyan-500/15" : "border-slate-700 hover:bg-slate-800"
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <StatusDot tone={z.status === "green" ? "good" : z.status === "yellow" ? "warn" : "bad"} />
+                    {z.name}
+                  </span>
+                  <span className="mt-1 block font-mono text-xs text-slate-400">{Math.round(z.flowLpm)} L/min</span>
+                </button>
               ))}
-            </select>
-          </label>
-          <label className="block text-sm">
-            <span className="text-slate-400">Target (hot zone)</span>
-            <select
-              value={String(targetId)}
-              onChange={(e) => setTargetId(e.target.value === "" ? "" : Number(e.target.value))}
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-cyan-400"
-            >
-              <option value="">—</option>
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-sm text-slate-400">Target (hot zone)</p>
+            <div className="grid grid-cols-2 gap-2">
               {zones.map((z) => (
-                <option key={z.id} value={z.id} disabled={z.id === sourceId}>
-                  {z.name} · {z.chipTempC.toFixed(1)}°C
-                </option>
+                <button
+                  key={z.id}
+                  type="button"
+                  onClick={() => setTargetId(z.id === targetId ? null : z.id)}
+                  aria-pressed={targetId === z.id}
+                  disabled={z.id === sourceId}
+                  className={`rounded-lg border p-2.5 text-left text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40 ${
+                    targetId === z.id ? "border-cyan-400/60 bg-cyan-500/15" : "border-slate-700 hover:bg-slate-800"
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <StatusDot tone={z.status === "green" ? "good" : z.status === "yellow" ? "warn" : "bad"} />
+                    {z.name}
+                  </span>
+                  <span className="mt-1 block font-mono text-xs text-slate-400">{z.chipTempC.toFixed(1)}°C</span>
+                </button>
               ))}
-            </select>
-          </label>
+            </div>
+          </div>
         </div>
 
-        <div className="mt-3 space-y-3">
+        <div className="mt-4 space-y-3">
           <label className="block text-sm">
             <span className="flex justify-between text-slate-300">
               <span>Water to transfer</span>
               <span className="font-mono text-cyan-300">{waterDelta} L/min</span>
             </span>
             <input type="range" min={0} max={maxWater} step={10} value={waterDelta} onChange={(e) => setWaterDelta(Number(e.target.value))} disabled={!source} className="mt-1 w-full accent-cyan-400" />
-            <span className="text-xs text-slate-500">source headroom: {maxWater} L/min</span>
+            <span className="text-xs text-slate-400">source headroom: {maxWater} L/min</span>
           </label>
           <label className="block text-sm">
             <span className="flex justify-between text-slate-300">
@@ -145,7 +157,7 @@ function TransferPage() {
               <span className="font-mono text-emerald-300">{powerDelta} MW</span>
             </span>
             <input type="range" min={0} max={maxPower} step={0.01} value={powerDelta} onChange={(e) => setPowerDelta(Number(e.target.value))} disabled={!source} className="mt-1 w-full accent-emerald-400" />
-            <span className="text-xs text-slate-500">source headroom: {maxPower} MW</span>
+            <span className="text-xs text-slate-400">source headroom: {maxPower} MW</span>
           </label>
         </div>
 
@@ -153,7 +165,7 @@ function TransferPage() {
           type="button"
           onClick={() => void create()}
           disabled={!source || !target}
-          className="mt-3 inline-flex items-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400 focus-visible:outline-2 focus-visible:outline-cyan-300 disabled:opacity-50"
+          className="mt-4 inline-flex items-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400 focus-visible:outline-2 focus-visible:outline-cyan-300 disabled:opacity-50"
         >
           <ArrowRight className="h-4 w-4" aria-hidden />
           Propose transfer (shadow)
@@ -196,7 +208,7 @@ function TransferPage() {
               <button type="button" onClick={() => void transition("verify")} className="rounded-lg border border-amber-500/50 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/10">
                 2 · Verify
               </button>
-              <button type="button" onClick={() => void transition("apply")} disabled={!active.feasible} className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50">
+              <button type="button" onClick={() => setConfirmApply(true)} disabled={!active.feasible} className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50">
                 3 · Apply (closed loop)
               </button>
               <button type="button" onClick={() => void transition("reject")} className="rounded-lg border border-red-500/50 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-500/10">
@@ -227,7 +239,7 @@ function TransferPage() {
                     </td>
                     <td className="py-1 pr-2 font-mono">{t.waterDeltaLpm} L/min</td>
                     <td className="py-1 pr-2 font-mono">{t.powerDeltaMw} MW</td>
-                    <td className="py-1 pr-2">{kindBadge(t.status === "applied" ? "applied" : t.status === "rejected" ? "fail_safe" : "would_be")}</td>
+                    <td className="py-1 pr-2"><KindBadge kind={t.status === "applied" ? "applied" : t.status === "rejected" ? "fail_safe" : "would_be"} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -235,6 +247,16 @@ function TransferPage() {
           </div>
         ) : null}
       </Panel>
+
+      <ConfirmDialog
+        open={confirmApply}
+        title="Apply this transfer?"
+        body="This writes the transferred setpoints to both zones' controllers. Slew limits and guardrails remain enforced."
+        confirmLabel="Apply transfer"
+        tone="danger"
+        onConfirm={() => void transition("apply")}
+        onCancel={() => setConfirmApply(false)}
+      />
     </div>
   );
 }

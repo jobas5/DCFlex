@@ -379,7 +379,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const db = getDb(env);
 
   if (path === "/api/health" && method === "GET") {
-    return json({ ok: true, service: "dc-cooling-optimizer" });
+    return json({ ok: true, service: "dcflex" });
   }
 
   // --- Telemetry -----------------------------------------------------------
@@ -394,6 +394,50 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 
   if (path === "/api/telemetry/tick" && method === "POST") {
     return json(await advanceSimulation(env));
+  }
+
+  if (path === "/api/telemetry/history" && method === "GET") {
+    const limit = Math.min(200, Number(url.searchParams.get("limit")) || 96);
+    const clusterParam = url.searchParams.get("clusterId");
+    if (clusterParam) {
+      const id = Number(clusterParam);
+      const rows = await db
+        .select()
+        .from(telemetrySamples)
+        .where(eq(telemetrySamples.clusterId, id))
+        .orderBy(desc(telemetrySamples.tick))
+        .limit(limit);
+      return json({
+        history: rows.reverse().map((r) => {
+          const p = JSON.parse(r.payload) as Telemetry;
+          return { tick: r.tick, timestamp: p.timestamp, pue: r.pue, wue: r.wue, gpuDieC: p.gpuDieC, cpuDieC: p.cpuDieC };
+        }),
+      });
+    }
+    // Facility aggregate: load-weighted PUE/WUE, worst die temps per tick.
+    const rows = await db
+      .select()
+      .from(telemetrySamples)
+      .orderBy(desc(telemetrySamples.tick))
+      .limit(limit * 4);
+    const byTick = new Map<number, { itLoad: number; pueSum: number; wueSum: number; maxGpu: number; maxCpu: number; ts: string }>();
+    for (const r of rows) {
+      const p = JSON.parse(r.payload) as Telemetry;
+      const g = byTick.get(r.tick) ?? { itLoad: 0, pueSum: 0, wueSum: 0, maxGpu: 0, maxCpu: 0, ts: p.timestamp };
+      g.itLoad += p.itLoadMw;
+      g.pueSum += r.pue * p.itLoadMw;
+      g.wueSum += r.wue * p.itLoadMw;
+      g.maxGpu = Math.max(g.maxGpu, p.gpuDieC);
+      g.maxCpu = Math.max(g.maxCpu, p.cpuDieC);
+      byTick.set(r.tick, g);
+    }
+    const history = [...byTick.keys()]
+      .sort((a, b) => a - b)
+      .map((t) => {
+        const g = byTick.get(t)!;
+        return { tick: t, timestamp: g.ts, pue: g.pueSum / g.itLoad, wue: g.wueSum / g.itLoad, gpuDieC: g.maxGpu, cpuDieC: g.maxCpu };
+      });
+    return json({ history });
   }
 
   // --- What-If counterfactual engine ----------------------------------------

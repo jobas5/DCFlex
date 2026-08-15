@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { LineChart } from "../components/LineChart";
 import { ErrorState, Panel, StatusBadge } from "../components/ui";
 import { api, type ModelMetricsResponse } from "../lib/api";
+import { fmtTime } from "../lib/time";
 import { modelInsights } from "../lib/twin/modelInsights";
 import { monotonicityCurve } from "../lib/twin/modelMeta";
 import { FACTORY_SETPOINTS } from "../lib/twin/types";
@@ -73,9 +74,7 @@ function ModelPage() {
   const { latest, card, drift } = data;
   const mono = monotonicityCurve(FACTORY_SETPOINTS);
   const health = modelInsights({ latest, card });
-  const driftLabels = drift.map((d) =>
-    new Date(d.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-  );
+  const driftLabels = drift.map((d) => fmtTime(d.t));
 
   const healthTone = health.status === "good" ? "good" : health.status === "watch" ? "warn" : "bad";
 
@@ -205,7 +204,7 @@ function ModelPage() {
             threshold={{ value: card.drift.warnThreshold, label: "warn 0.08", color: "#f87171" }}
           />
           <p className="mt-2 text-xs text-slate-400">{card.drift.metric}. Retrain trigger at {card.drift.criticalThreshold}.</p>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-400">
             In plain terms: each point is that hour's "how different is the facility from training". A rising line means the
             facility is changing (new hardware, season) and the model is aging.
           </p>
@@ -221,7 +220,7 @@ function ModelPage() {
             Response is structurally non-decreasing in IT load — a required monotonic constraint verified on every
             export.
           </p>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-400">
             In plain terms: this proves the model can never say "more heat needs less cooling". The line only goes up —
             that's the safety guarantee behind every what-if answer.
           </p>

@@ -1,5 +1,5 @@
 {
-  "name": "cloudflare-app-template",
+  "name": "dcflex",
   "private": true,
   "packageManager": "npm@10",
   "type": "module",

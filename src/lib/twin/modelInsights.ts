@@ -4,7 +4,7 @@ export interface ModelHealth {
   status: ModelHealthStatus;
   summary: string;
   recommendation: string;
-  action: { label: string; to: "/whatif" } | null;
+  action: { label: string; to: "/optimize" } | null;
 }
 
 interface ModelInsightsInput {
@@ -37,7 +37,7 @@ export function modelInsights({ latest, card }: ModelInsightsInput): ModelHealth
         "The model has drifted past the retrain threshold — the facility no longer behaves the way the model was trained on.",
       recommendation:
         "Retrain the model on recent data before trusting any what-if or per-zone suggestions. Until then, verify control actions against live telemetry.",
-      action: { label: "Re-check control state", to: "/whatif" },
+      action: { label: "Re-check control state", to: "/optimize" },
     };
   }
 
@@ -50,7 +50,7 @@ export function modelInsights({ latest, card }: ModelInsightsInput): ModelHealth
         : "Model drift is rising — the facility is slowly changing and the model is aging.",
       recommendation:
         "Keep using the model but double-check its suggestions. Plan a retraining run in the next maintenance cycle.",
-      action: { label: "Review what-if results", to: "/whatif" },
+      action: { label: "Review what-if results", to: "/optimize" },
     };
   }
 
@@ -60,6 +60,6 @@ export function modelInsights({ latest, card }: ModelInsightsInput): ModelHealth
       "The model is accurate and still matches the facility — its predictions track reality closely.",
     recommendation:
       "No action needed. You can trust the what-if engine and per-zone recommendations.",
-    action: { label: "Explore what-if scenarios", to: "/whatif" },
+    action: { label: "Explore what-if scenarios", to: "/optimize" },
   };
 }

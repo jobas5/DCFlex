@@ -1,5 +1,18 @@
 @import "tailwindcss";
 
+@theme {
+  --color-sev-ok: #34d399;
+  --color-sev-warn: #fbbf24;
+  --color-sev-crit: #f87171;
+  --color-sev-info: #22d3ee;
+  --color-chart-1: #22d3ee;
+  --color-chart-2: #34d399;
+  --color-chart-3: #fbbf24;
+  --color-chart-4: #f472b6;
+  --color-chart-5: #a78bfa;
+  --color-chart-6: #94a3b8;
+}
+
 :root {
   --font-body:
     ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;

@@ -1,28 +1,26 @@
-import { createRoute, Link } from "@tanstack/react-router";
+import { createRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
   FlaskConical,
   HeartPulse,
-  Pause,
-  Play,
   ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { LineChart } from "../components/LineChart";
 import { SetpointSliders } from "../components/SetpointSliders";
 import { useToast } from "../components/Toast";
-import { EmptyState, ErrorState, Panel, StatusBadge } from "../components/ui";
+import { EmptyState, ErrorState, ConfirmDialog, KindBadge, Panel, StatusBadge } from "../components/ui";
 import {
   api,
   type ControlResponse,
   type ControlZoneView,
-  type ValidationResponse,
   type WhatIfResponse,
   type WhatIfRunListItem,
 } from "../lib/api";
+import { useSim } from "../lib/simContext";
+import { fmtDateTime } from "../lib/time";
 import { predict } from "../lib/twin/surrogate";
-import { FACTORY_SETPOINTS, type Setpoints, type WhatIfCandidate, type ZoneView } from "../lib/twin/types";
+import { FACTORY_SETPOINTS, type Setpoints, type WhatIfCandidate } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
 export const WEATHER_PRESETS = [
@@ -30,18 +28,6 @@ export const WEATHER_PRESETS = [
   { id: "mild", label: "Mild", wetBulbC: 18 },
   { id: "hot", label: "Hot & humid", wetBulbC: 26 },
 ] as const;
-
-const fmtTime = (iso: string) =>
-  new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-
-const kindBadge = (kind: string) =>
-  kind === "applied" ? (
-    <StatusBadge tone="good">applied</StatusBadge>
-  ) : kind === "fail_safe" ? (
-    <StatusBadge tone="bad">fail-safe</StatusBadge>
-  ) : (
-    <StatusBadge tone="info">would-be</StatusBadge>
-  );
 
 export function CandidateTable({ candidates }: { candidates: WhatIfCandidate[] }) {
   return (
@@ -166,6 +152,8 @@ function ZoneControl({ zone, data, draft, setDraft, onRefresh, onApplied, dirty 
   dirty: boolean;
 }) {
   const toast = useToast();
+  const navigate = useNavigate();
+  const [confirmMode, setConfirmMode] = useState<"shadow" | "closed_loop" | null>(null);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -182,6 +170,8 @@ function ZoneControl({ zone, data, draft, setDraft, onRefresh, onApplied, dirty 
       onRefresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Mode change failed.", "error");
+    } finally {
+      setConfirmMode(null);
     }
   };
 
@@ -191,6 +181,7 @@ function ZoneControl({ zone, data, draft, setDraft, onRefresh, onApplied, dirty 
         const res = await api.applyShadow(zone.id, draft);
         toast("Applied to shadow — now monitoring.", "success");
         onApplied(res.shadowSetpoints);
+        navigate({ to: "/shadow", search: { zone: zone.id } });
       } else {
         const res = await api.applySetpoints(zone.id, draft, "Operator manual setpoint change");
         toast(
@@ -216,12 +207,26 @@ function ZoneControl({ zone, data, draft, setDraft, onRefresh, onApplied, dirty 
             </StatusBadge>
             <button
               type="button"
-              onClick={() => void switchMode(zone.mode === "shadow" ? "closed_loop" : "shadow")}
+              onClick={() => setConfirmMode(zone.mode === "shadow" ? "closed_loop" : "shadow")}
               className="rounded-lg border border-cyan-500/50 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 focus-visible:outline-2 focus-visible:outline-cyan-400"
             >
               Switch to {zone.mode === "shadow" ? "closed-loop" : "shadow"}
             </button>
           </div>
+
+          <ConfirmDialog
+            open={confirmMode !== null}
+            title={confirmMode === "closed_loop" ? "Enable closed-loop writeback?" : "Return to shadow mode?"}
+            body={
+              confirmMode === "closed_loop"
+                ? `DCFlex will write setpoints directly to ${zone.name}'s CDU/BMS controllers. Guardrails, slew limits, and the watchdog remain enforced.`
+                : `DCFlex will stop writing setpoints to ${zone.name}; recommendations become logged-only (would-be).`
+            }
+            confirmLabel={confirmMode === "closed_loop" ? "Enable closed-loop" : "Return to shadow"}
+            tone={confirmMode === "closed_loop" ? "danger" : "warn"}
+            onConfirm={() => confirmMode && void switchMode(confirmMode)}
+            onCancel={() => setConfirmMode(null)}
+          />
 
           <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -259,11 +264,20 @@ function ZoneControl({ zone, data, draft, setDraft, onRefresh, onApplied, dirty 
             <SlidersHorizontal className="h-4 w-4" aria-hidden />
             Apply setpoints
           </button>
+          {zone.mode === "shadow" ? (
+            <Link
+              to="/shadow"
+              search={{ zone: zone.id }}
+              className="ml-3 inline-block text-xs text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400"
+            >
+              View shadow validation →
+            </Link>
+          ) : null}
           {dirty ? (
             <p className="mt-2 text-xs text-amber-300">Unsaved changes — click Apply setpoints to save.</p>
           ) : null}
           {zone.mode === "shadow" ? (
-            <p className="mt-2 text-xs text-slate-500">Shadow mode: config is monitored against live data; nothing written to the CDU.</p>
+            <p className="mt-2 text-xs text-slate-400">Shadow mode: config is monitored against live data; nothing written to the CDU.</p>
           ) : null}
         </Panel>
       </div>
@@ -283,9 +297,9 @@ function ZoneControl({ zone, data, draft, setDraft, onRefresh, onApplied, dirty 
             <tbody>
               {data.actions.map((a) => (
                 <tr key={a.id} className="border-b border-slate-800/60 align-top">
-                  <td className="whitespace-nowrap px-2 py-2 font-mono text-xs text-slate-400">{fmtTime(a.createdAt)}</td>
+                  <td className="whitespace-nowrap px-2 py-2 font-mono text-xs text-slate-400">{fmtDateTime(a.createdAt)}</td>
                   <td className="px-2 py-2 text-xs text-slate-400">{data.zones.find((z) => z.id === a.clusterId)?.name ?? a.clusterId}</td>
-                  <td className="px-2 py-2">{kindBadge(a.kind)}</td>
+                  <td className="px-2 py-2"><KindBadge kind={a.kind} /></td>
                   <td className="px-2 py-2 font-mono text-xs">
                     {a.setpoints.coolantSupplyC}°C · {a.setpoints.pumpSpeedPct}% · {a.setpoints.valvePosPct}% · CDU{" "}
                     {a.setpoints.cduSetpointC}°C
@@ -301,136 +315,16 @@ function ZoneControl({ zone, data, draft, setDraft, onRefresh, onApplied, dirty 
   );
 }
 
-function ShadowValidation({ zoneId, targets }: { zoneId: number; targets: { pue: number; wue: number } }) {
-  const [data, setData] = useState<ValidationResponse | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setData(await api.getValidation(zoneId));
-    } catch {
-      /* ignore */
-    }
-  }, [zoneId]);
-
-  useEffect(() => {
-    void load();
-    const id = setInterval(() => void load(), 5000);
-    return () => clearInterval(id);
-  }, [load]);
-
-  if (!data) return null;
-
-  const labels = data.samples.map((s) => `#${s.tick}`);
-  const recent = data.samples.slice(-30).reverse();
-
-  return (
-    <Panel title="Shadow validation">
-      {!data.hasShadowConfig ? (
-        <p className="text-sm text-slate-400">
-          No shadow config set. Run What-If and "Use best setpoints", then click "Apply setpoints" to start validating a fixed configuration.
-        </p>
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-3">
-            <StatusBadge tone={data.ready ? "good" : "warn"}>
-              {data.ready ? "Ready for closed-loop" : "Not ready yet"}
-            </StatusBadge>
-            <span className="text-xs text-slate-400">{data.total} samples · 7-day window</span>
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
-              <p className="text-xs text-slate-400">Feasible</p>
-              <p className="mt-0.5 font-mono text-base tabular-nums">{Math.round(data.feasibleRate * 100)}%</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
-              <p className="text-xs text-slate-400">Meet target ±0.02</p>
-              <p className="mt-0.5 font-mono text-base tabular-nums">{Math.round(data.meetsRate * 100)}%</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
-              <p className="text-xs text-slate-400">In budget</p>
-              <p className="mt-0.5 font-mono text-base tabular-nums">{data.budgetOk}/{data.total}</p>
-            </div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
-              <p className="text-xs text-slate-400">Avg PUE gap</p>
-              <p className="mt-0.5 font-mono text-base tabular-nums">{data.avgPueGap.toFixed(4)}</p>
-            </div>
-          </div>
-
-          {data.samples.length > 1 ? (
-            <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <div>
-                <LineChart
-                  ariaLabel="Shadow config predicted vs actual PUE over the validation window"
-                  labels={labels}
-                  series={[
-                    { label: "Predicted PUE", color: "#22d3ee", values: data.samples.map((s) => s.predictedPue) },
-                    { label: "Actual PUE", color: "#94a3b8", values: data.samples.map((s) => s.actualPue) },
-                  ]}
-                  yFormat={(v) => v.toFixed(3)}
-                  threshold={{ value: targets.pue, label: `target ${targets.pue.toFixed(3)}`, color: "#f87171" }}
-                  band={{ lo: targets.pue - 0.02, hi: targets.pue + 0.02, color: "#22d3ee" }}
-                />
-              </div>
-              <div>
-                <LineChart
-                  ariaLabel="Shadow config predicted WUE over the validation window"
-                  labels={labels}
-                  series={[{ label: "Predicted WUE", color: "#34d399", values: data.samples.map((s) => s.predictedWue) }]}
-                  yFormat={(v) => v.toFixed(2)}
-                  threshold={{ value: targets.wue, label: `target ${targets.wue.toFixed(3)}`, color: "#f87171" }}
-                  band={{ lo: targets.wue - 0.02, hi: targets.wue + 0.02, color: "#34d399" }}
-                />
-              </div>
-            </div>
-          ) : null}
-
-          {recent.length ? (
-            <div className="mt-3 overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-700 text-slate-400">
-                    <th className="py-1 pr-2">Tick</th>
-                    <th className="py-1 pr-2">Pred PUE</th>
-                    <th className="py-1 pr-2">Actual PUE</th>
-                    <th className="py-1 pr-2">Pred WUE</th>
-                    <th className="py-1 pr-2">Chip</th>
-                    <th className="py-1 pr-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recent.map((s) => (
-                    <tr key={s.tick} className="border-b border-slate-800/60">
-                      <td className="py-1 pr-2 font-mono">{s.tick}</td>
-                      <td className="py-1 pr-2 font-mono text-cyan-300">{s.predictedPue.toFixed(4)}</td>
-                      <td className="py-1 pr-2 font-mono">{s.actualPue.toFixed(4)}</td>
-                      <td className="py-1 pr-2 font-mono text-emerald-300">{s.predictedWue.toFixed(3)}</td>
-                      <td className="py-1 pr-2 font-mono">{s.chipTempC.toFixed(1)}°C</td>
-                      <td className="py-1 pr-2">
-                        {s.feasible ? <StatusBadge tone="good">feasible</StatusBadge> : <StatusBadge tone="bad">violation</StatusBadge>}
-                        {!s.budgetOk ? <span className="ml-1 text-amber-300">· over budget</span> : null}
-                        {!s.meetsTarget ? <span className="ml-1 text-amber-300">· off target</span> : null}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </>
-      )}
-    </Panel>
-  );
-}
-
-function WhatIfPage() {
+function OptimizationPage() {
   const toast = useToast();
+  const { data: live } = useSim();
+  const liveViews = live?.zones ?? [];
   const [alpha, setAlpha] = useState(0.7);
   const [beta, setBeta] = useState(0.3);
   const [itLoad, setItLoad] = useState(6.4);
   const [wetBulb, setWetBulb] = useState(18);
   const [zoneId, setZoneId] = useState<number | null>(null);
   const [useLive, setUseLive] = useState(true);
-  const [liveViews, setLiveViews] = useState<ZoneView[]>([]);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<WhatIfResponse | null>(null);
   const [runs, setRuns] = useState<WhatIfRunListItem[]>([]);
@@ -440,7 +334,6 @@ function WhatIfPage() {
   const [control, setControl] = useState<ControlResponse | null>(null);
   const [draft, setDraft] = useState<Setpoints>(FACTORY_SETPOINTS);
   const [dirty, setDirty] = useState(false);
-  const [simRunning, setSimRunning] = useState(false);
 
   const updateDraft = useCallback((s: Setpoints) => {
     setDraft(s);
@@ -473,25 +366,7 @@ function WhatIfPage() {
   useEffect(() => {
     void loadRuns();
     void refreshControl();
-    api.telemetryCurrent()
-      .then((r) => setLiveViews(r.zones))
-      .catch(() => {});
   }, [loadRuns, refreshControl]);
-
-  useEffect(() => {
-    if (!simRunning) return;
-    const id = setInterval(async () => {
-      try {
-        await api.telemetryTick();
-        await refreshControl();
-        const r = await api.telemetryCurrent();
-        setLiveViews(r.zones);
-      } catch {
-        /* ignore */
-      }
-    }, 3000);
-    return () => clearInterval(id);
-  }, [simRunning, refreshControl]);
 
   const liveView = liveViews.find((z) => z.id === zoneId) ?? null;
 
@@ -551,32 +426,20 @@ function WhatIfPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Control Loop</h1>
-          <p className="text-sm text-slate-400">
-            What-If engine + per-zone control · minimize J = α·PUE + β·WUE under hard guardrails, slew limits, and a watchdog
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setSimRunning((v) => !v)}
-          aria-pressed={simRunning}
-          className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-medium focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-            simRunning ? "border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/10" : "border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/10"
-          }`}
-        >
-          {simRunning ? <Pause className="h-4 w-4" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
-          {simRunning ? "Pause simulation" : "Play simulation"}
-        </button>
+      <div>
+        <h1 className="text-xl font-semibold">Optimization</h1>
+        <p className="text-sm text-slate-400">
+          What-If engine + per-zone control · minimize J = α·PUE + β·WUE under hard guardrails, slew limits, and a watchdog
+        </p>
       </div>
 
       <Panel title="What-If engine — objective & scenario">
-        <div className="flex flex-wrap gap-2">
+        <div role="tablist" aria-label="Scenario scope" className="flex flex-wrap gap-2">
           <button
             type="button"
+            role="tab"
+            aria-selected={zoneId === null}
             onClick={() => setZoneId(null)}
-            aria-pressed={zoneId === null}
             className={`rounded-lg border px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 ${
               zoneId === null ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"
             }`}
@@ -587,8 +450,9 @@ function WhatIfPage() {
             <button
               key={z.id}
               type="button"
+              role="tab"
+              aria-selected={zoneId === z.id}
               onClick={() => setZoneId(z.id)}
-              aria-pressed={zoneId === z.id}
               className={`rounded-lg border px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 ${
                 zoneId === z.id ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"
               }`}
@@ -602,7 +466,7 @@ function WhatIfPage() {
           <div className="space-y-4">
             <div>
               <label htmlFor="alpha" className="flex justify-between text-sm text-slate-300">
-                <span>Grid carbon weight α <span className="text-slate-500">(PUE priority)</span></span>
+                <span>Grid carbon weight α <span className="text-slate-400">(PUE priority)</span></span>
                 <span className="font-mono text-cyan-300">{alpha.toFixed(2)}</span>
               </label>
               <input
@@ -622,7 +486,7 @@ function WhatIfPage() {
             </div>
             <div>
               <label htmlFor="beta" className="flex justify-between text-sm text-slate-300">
-                <span>Water scarcity weight β <span className="text-slate-500">(WUE priority)</span></span>
+                <span>Water scarcity weight β <span className="text-slate-400">(WUE priority)</span></span>
                 <span className="font-mono text-emerald-300">{beta.toFixed(2)}</span>
               </label>
               <input
@@ -732,8 +596,6 @@ function WhatIfPage() {
         <ZoneControl zone={controlZone} data={control ?? { zones: [], actions: [] }} draft={draft} setDraft={updateDraft} onRefresh={() => void refreshControl()} onApplied={handleApplied} dirty={dirty} />
       ) : null}
 
-      {controlZone ? <ShadowValidation zoneId={controlZone.id} targets={controlZone.targets} /> : null}
-
       <Panel title="Past runs">
         {runsError ? (
           <ErrorState message={runsError} onRetry={() => void loadRuns()} />
@@ -747,7 +609,7 @@ function WhatIfPage() {
             {runs.map((r) => (
               <li key={r.id}>
                 <Link
-                  to="/whatif/$runId"
+                  to="/optimize/$runId"
                   params={{ runId: String(r.id) }}
                   className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-sm hover:bg-slate-800/40 focus-visible:outline-2 focus-visible:outline-cyan-400"
                 >
@@ -771,8 +633,8 @@ function WhatIfPage() {
   );
 }
 
-export const whatifRoute = createRoute({
+export const optimizeRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/whatif",
-  component: WhatIfPage,
+  path: "/optimize",
+  component: OptimizationPage,
 });

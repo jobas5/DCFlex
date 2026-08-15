@@ -4,17 +4,19 @@ import { createRoot } from "react-dom/client";
 import { masterDataRoute } from "./routes/masterData";
 import { modelRoute } from "./routes/model";
 import { notFoundRoute } from "./routes/notFound";
+import { optimizeRoute } from "./routes/optimize";
+import { optimizeDetailRoute } from "./routes/optimizeDetail";
 import { overviewRoute } from "./routes/overview";
 import { rootRoute } from "./routes/root";
+import { shadowRoute } from "./routes/shadow";
 import { transferRoute } from "./routes/transfer";
-import { whatifRoute } from "./routes/whatif";
-import { whatifDetailRoute } from "./routes/whatifDetail";
 import "./styles.css";
 
 const routeTree = rootRoute.addChildren([
   overviewRoute,
-  whatifRoute,
-  whatifDetailRoute,
+  optimizeRoute,
+  optimizeDetailRoute,
+  shadowRoute,
   transferRoute,
   modelRoute,
   masterDataRoute,

@@ -12,6 +12,15 @@ export interface TelemetryCurrentResponse {
   zones: ZoneView[];
 }
 
+export interface HistoryPoint {
+  tick: number;
+  timestamp: string;
+  pue: number;
+  wue: number;
+  gpuDieC: number;
+  cpuDieC: number;
+}
+
 export interface WhatIfResponse {
   runId: number;
   createdAt?: string;
@@ -168,6 +177,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   telemetryCurrent: () => request<TelemetryCurrentResponse>("/api/telemetry/current"),
   telemetryTick: () => request<TelemetryCurrentResponse>("/api/telemetry/tick", { method: "POST", body: "{}" }),
+  telemetryHistory: (clusterId?: number, limit = 96) =>
+    request<{ history: HistoryPoint[] }>(
+      `/api/telemetry/history?limit=${limit}${clusterId != null ? `&clusterId=${clusterId}` : ""}`,
+    ),
   runWhatIf: (input: {
     alpha: number;
     beta: number;

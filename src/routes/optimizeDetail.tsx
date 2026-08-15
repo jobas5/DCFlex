@@ -2,11 +2,12 @@ import { createRoute, Link, useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 import { ErrorState, StatusBadge } from "../components/ui";
 import { api, type WhatIfResponse } from "../lib/api";
+import { fmtDateTime } from "../lib/time";
 import { rootRoute } from "./root";
-import { WhatIfResults } from "./whatif";
+import { WhatIfResults } from "./optimize";
 
-function WhatIfDetailPage() {
-  const { runId } = useParams({ from: "/whatif/$runId" });
+function OptimizationDetailPage() {
+  const { runId } = useParams({ from: "/optimize/$runId" });
   const [result, setResult] = useState<WhatIfResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [zoneNames, setZoneNames] = useState<Record<number, string>>({});
@@ -32,12 +33,12 @@ function WhatIfDetailPage() {
   return (
     <div className="space-y-4">
       <div>
-        <Link to="/whatif" className="text-sm text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400">
-          ← Back to Control Loop
+        <Link to="/optimize" className="text-sm text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400">
+          ← Back to Optimization
         </Link>
         <h1 className="mt-1 text-xl font-semibold">What-If Run #{result.runId}</h1>
         <p className="flex flex-wrap items-center gap-2 text-sm text-slate-400">
-          {result.createdAt ? new Date(result.createdAt).toLocaleString() : ""}
+          {result.createdAt ? fmtDateTime(result.createdAt) : ""}
           {result.zoneId != null ? (
             <StatusBadge tone="info">{zoneNames[result.zoneId] ?? `Zone ${result.zoneId}`}</StatusBadge>
           ) : (
@@ -55,8 +56,8 @@ function WhatIfDetailPage() {
   );
 }
 
-export const whatifDetailRoute = createRoute({
+export const optimizeDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/whatif/$runId",
-  component: WhatIfDetailPage,
+  path: "/optimize/$runId",
+  component: OptimizationDetailPage,
 });
