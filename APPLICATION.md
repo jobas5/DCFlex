@@ -10,9 +10,11 @@ A complete technical reference for the DCFlex application: technology stack, tun
 | --- | --- |
 | Frontend | React 19, Vite, TypeScript |
 | Routing | TanStack Router |
-| Styling | Tailwind CSS v4 (custom `@theme` tokens) |
+| Styling | Tailwind CSS v4 — semantic color tokens (`@theme inline` over CSS variables), dark + light themes |
+| Typography | Geist / Geist Mono (Google Fonts) |
 | Icons | lucide-react |
 | Charts | Custom SVG (`LineChart`, compact sparkline mode) |
+| 3D | three.js + @react-three/fiber (lazy-loaded on `/facility` only) |
 | Backend | Cloudflare Worker (TypeScript) |
 | Database | Cloudflare D1 (SQLite) via Drizzle ORM |
 | Simulation | In-process TypeScript digital twin, shared client/worker |
@@ -71,9 +73,11 @@ Safety envelope enforced on every write path and every what-if candidate.
 
 Violation codes: `CHIP_TEMP`, `DELTA_P_LOW`, `DELTA_P_HIGH`, `FLOW_LOW`, `FLOW_HIGH`.
 
+The what-if optimizer additionally requires an **operating reserve**: candidates must keep thermal margin ≥ `MARGIN_TIERS.green` (5 °C), reported as `THERMAL_MARGIN`. Passing the 85 °C guardrail by a hair would otherwise put the zone straight into the warning/critical band (and trip alerts).
+
 ### 3.3 Slew-rate limits (`SLEW_LIMITS`)
 
-Applied to any setpoint change (manual or automated).
+Applied to every real setpoint write: manual closed-loop writes, closed-loop steering, the first step when closed-loop is enabled, and transfer apply.
 
 | Field | Limit (per action) |
 | --- | --- |
@@ -127,6 +131,8 @@ Minimize **J = α·PUE + β·WUE**, each term min-max normalized across the feas
 | `itLoadMw` | Scenario IT load | 2 – 12 MW (slider) |
 | `wetBulbC` | Ambient wet-bulb | presets 10 / 18 / 26 °C |
 
+Feasible = inside every hard guardrail **and** the 5 °C operating reserve.
+
 Grid search ranges (1,560 permutations = 15 × 13 × 8):
 
 | Axis | Range | Step |
@@ -173,7 +179,7 @@ All predictions derive from setpoints + telemetry.
 - **ΔP** (`deltaPFromFlow`): `48 + 150 · (flow/1600)² · restriction`, where `restriction = 0.55 + 0.85·(1−valve)²`.
 - **Chip temp** (`chipTempC`): `supply + 6.5 + 44 · (itLoad/9) · (900/flow)^0.8`.
 - **Pump power**: `0.02 + 0.5 · (pump/100)³ · (0.6 + 0.4·itLoad/10)`.
-- **Chiller power**: `itLoad · 0.115 · (1 − 0.72·freeCoolingShare) · wetBulbPenalty · (1 + liftC·0.01)`, where `freeCoolingShare = clamp((supply−16)/18, 0, 1)`, `wetBulbPenalty = 1 + max(0, wetBulb−14)·0.022`, `liftC = max(0, supply − wetBulb − 2)`.
+- **Chiller power**: `itLoad · 0.115 · (1 − 0.72·freeCoolingShare) · wetBulbPenalty · (1 + liftC·0.01)`, where `freeCoolingShare = clamp((supply−16)/18, 0, 1)`, `wetBulbPenalty = 1 + max(0, wetBulb−14)·0.022`, `liftC = max(0, wetBulb + 10 − supply)` (chiller lift: condenser ≈ wet-bulb + approach, minus supply). Lift grows with wet-bulb and shrinks with supply, so both monotonic constraints hold everywhere; the factory point (wet-bulb 16 °C, supply 22 °C) keeps lift 4.
 - **Accessory power** = pump + chiller.
 - **PUE** = (IT + accessory) / IT.
 - **WUE**: `evapBase · (1 − liquidShare·0.78) · (chiller/accessory + 0.35)`, where `evapBase = 0.2 + max(0, wetBulb−10)·0.045`, `liquidShare = clamp(0.45 + (supply−16)·0.035 + (pump−60)·0.001, 0.3, 0.95)`.
@@ -185,7 +191,20 @@ Deterministic (mulberry32 seeded by tick). 10-minute ticks (`TICK_MS = 600000`).
 - **IT load**: diurnal sine cycle by `loadPhaseH` + EMA smoothing (0.75 prev) + noise.
 - **Wet-bulb**: base 16 °C + per-zone offset + diurnal wave + noise; dry-bulb = wet + 4 + rand·5.
 - **Flow / ΔP / chip** from setpoints via the surrogate; CPU die ≈ GPU − 2.5 − rand·2.
-- **Data-quality anomalies** (probabilistic): ~4% outlier (removed + imputed), ~4% wet-bulb drift flag, ~3% imputed gap.
+- **Data-quality anomalies** (probabilistic): ~4% CDU-supply outlier (removed + replaced by the model estimate), ~4% wet-bulb drift (recalibrated), ~3% imputed gap on one of flow / ΔP / CDU return / facility-water flow / dry-bulb (picked by tick). Each tick's report lists the affected sensor in `quality.events` and is stored with the sample.
+- The PRNG seed is salted by the zone profile, so zones don't share identical noise or sensor faults.
+
+### Sensors (`sensors.ts`)
+
+Every zone carries the same 10 sensors, each mapped to a telemetry field: GPU/CPU die (rack cold plate), CDU supply/return temperature, secondary-loop flow, ΔP (CDU), facility-water supply temperature and flow (primary loop), wet-bulb/dry-bulb (cooling-tower weather mast). `GET /api/sensors` derives each sensor's status from its latest reading and the data-quality events in the window:
+
+| Status | Rule |
+| --- | --- |
+| `crit` | Reading outside its hard guardrail (die > 85 °C, flow outside 400–1600 L/min, ΔP outside 60–240 kPa) |
+| `warn` | Die temperature within 5 °C of the limit, a data-quality action in the last 3 ticks, or ≥ 3 actions in the window |
+| `ok` | Otherwise |
+
+The 3D layout (`src/components/facility/layout.ts`) is representative, not a surveyed floor plan.
 
 ### Forecast (`forecast.ts`)
 
@@ -204,6 +223,8 @@ Each horizon returns `peakChipTempC`, `peakAtTicks`, `worstMargin`, `rising`.
 
 `proposeTransfer(target, source, waterDeltaLpm, powerDeltaMw)` reallocates cooling effort by setpoint inversion (bisection on pump speed for flow, on supply temp for chiller power), clamped so the source never drops below guardrail floors or its own budget. Returns per-zone proposals + actual deltas.
 
+The bisected pump speed is rounded to a whole percent, and rounded up instead when plain rounding would dip the flow below the 400 L/min floor.
+
 ---
 
 ## 5. Flows
@@ -214,8 +235,10 @@ Triggered by cron every minute (and `POST /api/telemetry/tick`).
 
 ```
 for each zone:
-  1. detectFailSafe(zone)          # heartbeat age > 90s → revert to factory, log fail_safe
-  2. steerZone(zone, prev)         # closed-loop only: target-gap → what-if → slew-limit → write
+  1. detectFailSafe(zone)          # heartbeat age > 90s → factory setpoints become real,
+                                   #   closed-loop disengages to shadow, log fail_safe
+  2. steerZone(zone, prev)         # closed-loop only (skipped on fail-safe): target-gap →
+                                   #   what-if → slew-limit → write + log only if changed
   3. tickTelemetry(prev, tick, steered)
   4. insert telemetry_samples
   5. if shadow config: insert shadow_samples
@@ -235,8 +258,11 @@ Only when `mode === "closed_loop"`:
 runWhatIf(α, β, live itLoad, live wetBulb)
 best = first feasible candidate within water & power budgets
 applySlewLimits(current, best.setpoints)
-write currentSetpoints + control action "applied"
+if unchanged: no write, no log entry
+else write currentSetpoints + control action "applied"
 ```
+
+> The heartbeat is refreshed by every simulation tick. Production ticks once a minute via cron; **local dev has no cron**, so press *Run* in the top bar (or `POST /api/telemetry/tick`) — otherwise the 90 s watchdog fail-safes every zone back to factory setpoints.
 
 ### 5.3 What-If run (user-initiated)
 
@@ -250,26 +276,34 @@ POST /api/whatif  (α, β, zoneId?, itLoadMw?, wetBulbC?)
 ### 5.4 Shadow validation
 
 ```
-POST /api/control/applyShadow  → guardrail + budget check → write shadowSetpoints
-cron tick writes shadow_samples (predicted vs actual PUE/WUE, chip, feasible)
-GET /api/zones/{id}/validation  → feasibleRate, meetsRate, ready
-ready = feasibleRate ≥ 0.95 && meetsRate ≥ 0.90
-POST /api/control/mode "closed_loop"  → promote validated shadow config
+POST /api/control/applyShadow  → guardrail + budget check → write shadowSetpoints, reset samples
+cron tick writes shadow_samples (shadow-predicted vs live-config PUE/WUE, chip, feasible)
+  meetsTarget = PUE ≤ target + 0.02 && WUE ≤ target + 0.02   (beating the target counts)
+GET /api/zones/{id}/validation  → feasibleRate, meetsRate, ready, criteria
+ready = samples ≥ 6 && feasibleRate ≥ 0.95 && meetsRate ≥ 0.90
+POST /api/control/mode "closed_loop"  → 422 unless ready; then move toward the
+                                         validated config through the slew limiter
 ```
+
+Shadow mode never writes back: `POST /api/control/apply` on a shadow-mode zone only logs a `would_be` action.
 
 ### 5.5 Cooling transfer
 
 ```
 POST /api/transfers (sourceId, targetId, waterDelta, powerDelta)
   → proposeTransfer → facility budget check → persist status "shadow"
+POST /api/transfers/{id}/virtual → /verify     (status only; UI enforces this order)
 POST /api/transfers/{id}/apply
-  → write both zones' setpoints AND reallocate budgets (source −, target +)
+  → 409 if already applied/rejected
+  → re-check guardrails on live telemetry (422 on violation)
+  → write both zones' setpoints through the slew limiter AND reallocate budgets
 ```
 
 ### 5.6 Authentication
 
 ```
 POST /api/auth/login → PBKDF2 verify → HMAC token → Set-Cookie (HttpOnly, 12h)
+                       (>10 failed attempts/min per IP → 429; success resets the counter)
 every /api/* → readSession (HMAC verify + expiry) unless public
 POST /api/auth/logout → clear cookie
 ```
@@ -289,7 +323,8 @@ Edge-triggered state machine (dedup via `alert_events` table): each monitored co
 State providers (nest in `root.tsx`):
 
 - `AuthProvider` — session status (`loading` / `authed` / `anonymous`).
-- `SimProvider` — polls `/api/telemetry/current` every 5s; optional `/api/telemetry/tick` when "running".
+- `ThemeProvider` — dark/light theme, persisted in `localStorage` (`dcflex:theme`) and applied before paint by `index.html`.
+- `SimProvider` — polls `/api/telemetry/current` every 5s while signed in; `/api/telemetry/tick` every 3s when "running".
 - `ToastProvider` — transient notifications.
 
 ### 6.2 Shared twin
@@ -297,6 +332,8 @@ State providers (nest in `root.tsx`):
 `src/lib/twin/*` is imported by both the Worker (cron, `runWhatIf`, `proposeTransfer`, `predict`, `forecastZone`) and the browser (live impact previews on the Optimization and Transfer pages). This guarantees the UI preview matches the server result exactly.
 
 ### 6.3 Database schema
+
+Master data writes are validated server-side: targets positive (PUE ≥ 1), water budget ≥ 400 L/min, and Σ zone budgets ≤ facility budget (`PATCH /api/zones/{id}` and `PATCH /api/facility` return 400/404/422).
 
 `src/db/schema.ts` (Drizzle) — tables: `zones`, `facility_config`, `telemetry_samples`, `shadow_samples`, `whatif_runs`, `whatif_candidates`, `control_actions`, `power_transfers`, `alert_events`, `model_metrics`. Migrations are append-only in `migrations/`; demo data in `seeds/local.sql` (re-runnable `INSERT OR IGNORE`).
 
@@ -328,6 +365,13 @@ State providers (nest in `root.tsx`):
 | `src/lib/twin/forecast.ts` | Hold-setpoint forecast |
 | `src/lib/twin/transfer.ts` | Cooling-transfer solver |
 | `src/lib/twin/modelMeta.ts` | Model card + drift/curve data |
+| `src/lib/twin/sensors.ts` | Sensor catalog + health rules |
+| `src/components/facility/` | three.js scene (`FacilityScene.tsx`, lazy) and 3D layout (`layout.ts`) |
 | `src/lib/api.ts` | Typed API client |
 | `src/lib/auth.tsx` | Auth context |
 | `src/lib/simContext.tsx` | Live telemetry polling |
+| `src/lib/theme.tsx` | Theme provider (dark/light) |
+| `src/lib/nav.ts` | Navigation groups shared by sidebar, mobile bar and top bar |
+| `src/components/ui.tsx` | Design-system primitives (Card, KpiTile, Badge, Button, Segmented, Slider…) |
+| `src/components/LineChart.tsx` | SVG line/area chart + `Sparkline` |
+| `src/styles.css` | Theme tokens (CSS variables) + Tailwind `@theme` mapping |

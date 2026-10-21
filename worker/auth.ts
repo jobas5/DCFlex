@@ -138,17 +138,28 @@ export function getSessionToken(request: Request): string | null {
 /* ------------------------------------------------------------------ */
 
 const attempts = new Map<string, { count: number; resetAt: number }>();
+const MAX_FAILURES_PER_MIN = 10;
 
 export function loginRateLimited(ip: string): boolean {
-  const now = Date.now();
   const rec = attempts.get(ip);
-  if (!rec || now > rec.resetAt) {
-    attempts.set(ip, { count: 1, resetAt: now + 60_000 });
+  if (!rec) return false;
+  if (Date.now() > rec.resetAt) {
+    attempts.delete(ip);
     return false;
   }
-  rec.count += 1;
-  if (rec.count > 10) return true; // >10 failures/min
-  return false;
+  return rec.count >= MAX_FAILURES_PER_MIN;
+}
+
+/** Only failed attempts count toward the limit; a successful login resets it. */
+export function recordLoginFailure(ip: string): void {
+  const now = Date.now();
+  const rec = attempts.get(ip);
+  if (!rec || now > rec.resetAt) attempts.set(ip, { count: 1, resetAt: now + 60_000 });
+  else rec.count += 1;
+}
+
+export function resetLoginFailures(ip: string): void {
+  attempts.delete(ip);
 }
 
 export async function delay(ms: number): Promise<void> {

@@ -7,17 +7,21 @@ import {
   type ReactNode,
 } from "react";
 import { api, type TelemetryCurrentResponse } from "./api";
+import { useAuth } from "./auth";
 
 interface SimContextValue {
   data: TelemetryCurrentResponse | null;
   running: boolean;
   toggle: () => void;
+  refresh: () => Promise<void>;
   lastUpdatedAt: number | null;
 }
 
 const SimContext = createContext<SimContextValue | null>(null);
 
 export function SimProvider({ children }: { children: ReactNode }) {
+  const { status } = useAuth();
+  const authed = status === "authed";
   const [data, setData] = useState<TelemetryCurrentResponse | null>(null);
   const [running, setRunning] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -28,33 +32,40 @@ export function SimProvider({ children }: { children: ReactNode }) {
       setData(d);
       setLastUpdatedAt(Date.now());
     } catch {
-      /* ignore */
+      /* keep last good data */
     }
   }, []);
 
+  // Poll only while signed in: polling the login screen would just 401 every 5s.
   useEffect(() => {
+    if (!authed) {
+      setData(null);
+      setRunning(false);
+      return;
+    }
     void refresh();
     const id = setInterval(() => void refresh(), 5000);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [authed, refresh]);
 
   useEffect(() => {
-    if (!running) return;
+    if (!running || !authed) return;
     const id = setInterval(async () => {
       try {
-        await api.telemetryTick();
-        await refresh();
+        const d = await api.telemetryTick();
+        setData(d);
+        setLastUpdatedAt(Date.now());
       } catch {
         /* ignore */
       }
     }, 3000);
     return () => clearInterval(id);
-  }, [running, refresh]);
+  }, [running, authed]);
 
   const toggle = useCallback(() => setRunning((v) => !v), []);
 
   return (
-    <SimContext.Provider value={{ data, running, toggle, lastUpdatedAt }}>
+    <SimContext.Provider value={{ data, running, toggle, refresh, lastUpdatedAt }}>
       {children}
     </SimContext.Provider>
   );

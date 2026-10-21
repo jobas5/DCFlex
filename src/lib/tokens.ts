@@ -1,15 +1,20 @@
+// CSS-variable colors for SVG strokes/fills, so charts follow the active theme.
+// Values mirror the semantic tokens in styles.css.
 export const SEVERITY = {
-  ok: "#34d399",
-  warn: "#fbbf24",
-  crit: "#f87171",
-  info: "#22d3ee",
+  ok: "var(--ok)",
+  warn: "var(--warn)",
+  crit: "var(--crit)",
+  info: "var(--info)",
 } as const;
 
 export const CHART = {
-  cyan: "#22d3ee",
-  emerald: "#34d399",
-  amber: "#fbbf24",
-  pink: "#f472b6",
-  purple: "#a78bfa",
-  slate: "#94a3b8",
+  cyan: "var(--accent)",
+  emerald: "var(--ok)",
+  amber: "var(--warn)",
+  pink: "var(--pink)",
+  purple: "var(--violet)",
+  rose: "var(--crit)",
+  slate: "var(--fg-subtle)",
+  grid: "var(--chart-grid)",
+  axis: "var(--chart-axis)",
 } as const;

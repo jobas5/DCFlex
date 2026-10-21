@@ -15,6 +15,7 @@ import { driftSeries, MODEL_CARD } from "../src/lib/twin/modelMeta";
 import { runWhatIf, type WhatIfRequest } from "../src/lib/twin/optimizer";
 import { tickTelemetry } from "../src/lib/twin/simulator";
 import { forecastZone } from "../src/lib/twin/forecast";
+import { sensorReadings, type StoredSample } from "../src/lib/twin/sensors";
 import {
   applySlewLimits,
   evaluateGuardrails,
@@ -30,12 +31,15 @@ import {
   getSessionToken,
   loginRateLimited,
   readSession,
+  recordLoginFailure,
+  resetLoginFailures,
   sessionCookieHeader,
   verifyPassword,
 } from "./auth";
 import { evaluateAlerts } from "./telegram";
 import {
   FACTORY_SETPOINTS,
+  GUARDRAILS,
   SLEW_LIMITS,
   zoneStatus,
   type ControlAction,
@@ -52,6 +56,11 @@ import {
 type Env = CloudflareDatabaseEnv;
 
 const WATCHDOG_TIMEOUT_SEC = 90;
+// Shadow validation needs at least one sim-hour of samples before it can pass.
+const MIN_VALIDATION_SAMPLES = 6;
+const VALIDATION_FEASIBLE_RATE = 0.95;
+const VALIDATION_MEETS_RATE = 0.9;
+const TARGET_TOLERANCE = 0.02;
 
 const DEFAULT_ZONES = [
   { id: 1, name: "Zone A", baseLoadMw: 5.5, loadAmpMw: 2.0, loadPhaseH: 9, wetBulbOffsetC: 0, targetPue: 1.11, targetWue: 0.115, waterBudgetLpm: 1400, powerBudgetMw: 1.2 },
@@ -80,6 +89,14 @@ const parseSetpoints = (raw: string): Setpoints => {
     return factorySetpoints();
   }
 };
+
+const sameSetpoints = (a: Setpoints, b: Setpoints) =>
+  a.coolantSupplyC === b.coolantSupplyC &&
+  a.pumpSpeedPct === b.pumpSpeedPct &&
+  a.valvePosPct === b.valvePosPct &&
+  a.cduSetpointC === b.cduSetpointC;
+
+const isPositive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 
 const zoneSpec = (z: (typeof zones.$inferSelect)): ZoneSpec => ({
   baseLoadMw: z.baseLoadMw,
@@ -130,7 +147,11 @@ async function latestTelemetryForZone(env: Env, zone: ZoneRow): Promise<Telemetr
     .where(eq(telemetrySamples.clusterId, zone.id))
     .orderBy(desc(telemetrySamples.tick))
     .limit(1);
-  if (rows.length) return JSON.parse(rows[0].payload) as Telemetry;
+  if (rows.length) {
+    // Payloads carry the tick's data-quality report alongside the telemetry.
+    const { quality: _quality, ...telemetry } = JSON.parse(rows[0].payload) as StoredSample;
+    return telemetry;
+  }
   const { telemetry } = tickTelemetry(null, 1000, parseSetpoints(zone.currentSetpoints), zoneSpec(zone));
   return telemetry;
 }
@@ -238,6 +259,8 @@ async function steerZone(env: Env, zone: ZoneRow, telemetry: Telemetry): Promise
   );
   if (!best) return current;
   const { setpoints: clamped, limited } = applySlewLimits(current, best.setpoints);
+  // Already at the optimum: nothing to write, and no log entry every tick.
+  if (sameSetpoints(clamped, current)) return current;
   await db
     .update(zones)
     .set({
@@ -278,16 +301,25 @@ async function detectFailSafe(
     : null;
   const failSafe = heartbeatAgeSec !== null && heartbeatAgeSec > WATCHDOG_TIMEOUT_SEC;
   if (failSafe && zone.failSafeActive !== 1) {
+    // Actually revert: factory setpoints become the real config and closed-loop
+    // disengages, so an operator has to re-enable it once comms are back.
     await db
       .update(zones)
-      .set({ failSafeActive: 1, commsOk: 0, updatedAt: now.toISOString() })
+      .set({
+        failSafeActive: 1,
+        commsOk: 0,
+        mode: "shadow",
+        currentSetpoints: JSON.stringify(FACTORY_SETPOINTS),
+        slewLimited: 0,
+        updatedAt: now.toISOString(),
+      })
       .where(eq(zones.id, zone.id));
     await db.insert(controlActions).values({
       clusterId: zone.id,
       mode: zone.mode,
       kind: "fail_safe",
       setpoints: JSON.stringify(FACTORY_SETPOINTS),
-      note: `Watchdog: heartbeat lost >${WATCHDOG_TIMEOUT_SEC}s — reverted to factory setpoints`,
+      note: `Watchdog: heartbeat lost >${WATCHDOG_TIMEOUT_SEC}s — reverted to factory setpoints${zone.mode === "closed_loop" ? ", closed-loop disengaged" : ""}`,
     });
   }
   return { failSafe, heartbeatAgeSec };
@@ -339,12 +371,20 @@ async function controlSnapshot(env: Env) {
   };
 }
 
-function shadowSampleRow(zone: ZoneRow, telemetry: Telemetry, shadowSetpoints: Setpoints, tick: number) {
+function shadowSampleRow(
+  zone: ZoneRow,
+  telemetry: Telemetry,
+  shadowSetpoints: Setpoints,
+  tick: number,
+  actualSetpoints = parseSetpoints(zone.currentSetpoints),
+) {
   const sp = predict(telemetry, shadowSetpoints);
-  const actual = predict(telemetry, parseSetpoints(zone.currentSetpoints));
+  const actual = predict(telemetry, actualSetpoints);
   const sg = evaluateGuardrails(sp);
   const budgetOk = sp.flowLpm <= zone.waterBudgetLpm && sp.accessoryPowerMw <= zone.powerBudgetMw;
-  const meetsTarget = Math.abs(sp.pue - zone.targetPue) <= 0.02 && Math.abs(sp.wue - zone.targetWue) <= 0.02;
+  // One-sided: beating the target (lower PUE/WUE) counts as meeting it.
+  const meetsTarget =
+    sp.pue <= zone.targetPue + TARGET_TOLERANCE && sp.wue <= zone.targetWue + TARGET_TOLERANCE;
   return {
     clusterId: zone.id,
     tick,
@@ -360,6 +400,30 @@ function shadowSampleRow(zone: ZoneRow, telemetry: Telemetry, shadowSetpoints: S
   };
 }
 
+async function validationStats(env: Env, zone: ZoneRow) {
+  const rows = await getDb(env)
+    .select()
+    .from(shadowSamples)
+    .where(eq(shadowSamples.clusterId, zone.id))
+    .orderBy(desc(shadowSamples.id))
+    .limit(1008);
+  const total = rows.length;
+  const feasible = rows.filter((r) => r.feasible === 1).length;
+  const budgetOk = rows.filter((r) => r.budgetOk === 1).length;
+  const meets = rows.filter((r) => r.meetsTarget === 1).length;
+  const avgPueGap = total
+    ? rows.reduce((s, r) => s + Math.max(0, r.predictedPue - zone.targetPue), 0) / total
+    : 0;
+  const feasibleRate = total ? feasible / total : 0;
+  const meetsRate = total ? meets / total : 0;
+  const ready =
+    zone.shadowSetpoints != null &&
+    total >= MIN_VALIDATION_SAMPLES &&
+    feasibleRate >= VALIDATION_FEASIBLE_RATE &&
+    meetsRate >= VALIDATION_MEETS_RATE;
+  return { rows, total, feasible, budgetOk, meets, feasibleRate, meetsRate, avgPueGap, ready };
+}
+
 async function advanceSimulation(env: Env) {
   const db = getDb(env);
   const allZones = await listZones(env);
@@ -372,18 +436,20 @@ async function advanceSimulation(env: Env) {
     const fs = await detectFailSafe(env, z, now);
     failSafe[z.id] = fs.failSafe;
     const prev = await latestTelemetryForZone(env, z);
-    const steered = await steerZone(env, z, prev);
-    const { telemetry } = tickTelemetry(prev, nextTick, steered, zoneSpec(z));
+    const steered = fs.failSafe ? factorySetpoints() : await steerZone(env, z, prev);
+    const { telemetry, quality } = tickTelemetry(prev, nextTick, steered, zoneSpec(z));
     const prediction = predict(telemetry, steered);
     await db.insert(telemetrySamples).values({
       clusterId: z.id,
       tick: nextTick,
-      payload: JSON.stringify(telemetry),
+      payload: JSON.stringify({ ...telemetry, quality } satisfies StoredSample),
       pue: prediction.pue,
       wue: prediction.wue,
     });
     if (z.shadowSetpoints) {
-      await db.insert(shadowSamples).values(shadowSampleRow(z, telemetry, parseSetpoints(z.shadowSetpoints), nextTick));
+      await db
+        .insert(shadowSamples)
+        .values(shadowSampleRow(z, telemetry, parseSetpoints(z.shadowSetpoints), nextTick, steered));
     }
     views.push(buildZoneView(z, telemetry, steered));
   }
@@ -427,9 +493,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const okUser = env.AUTH_USERNAME ? body.username === env.AUTH_USERNAME : false;
     const okPass = await verifyPassword(env, body.password);
     if (!okUser || !okPass) {
+      recordLoginFailure(ip);
       await delay(400);
       return json({ error: "Invalid username or password." }, 401);
     }
+    resetLoginFailures(ip);
     const token = await createSession(env);
     if (!token) return json({ error: "Auth is not configured." }, 500);
     return new Response(JSON.stringify({ ok: true }), {
@@ -493,11 +561,12 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       });
     }
     // Facility aggregate: load-weighted PUE/WUE, worst die temps per tick.
+    const zoneCount = (await listZones(env)).length || 1;
     const rows = await db
       .select()
       .from(telemetrySamples)
       .orderBy(desc(telemetrySamples.tick))
-      .limit(limit * 4);
+      .limit(limit * zoneCount);
     const byTick = new Map<number, { itLoad: number; accessory: number; pueSum: number; wueSum: number; maxGpu: number; maxCpu: number; ts: string }>();
     for (const r of rows) {
       const p = JSON.parse(r.payload) as Telemetry;
@@ -686,12 +755,42 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       powerBudgetMw?: number;
     }>(request);
     if (!body) return json({ error: "body required." }, 400);
+    const allZones = await listZones(env);
+    const zone = allZones.find((z) => z.id === id);
+    if (!zone) return json({ error: "Zone not found." }, 404);
+    if (body.name !== undefined && (typeof body.name !== "string" || !body.name.trim())) {
+      return json({ error: "name must be a non-empty string." }, 400);
+    }
+    if (body.targetPue !== undefined && !(isPositive(body.targetPue) && body.targetPue >= 1)) {
+      return json({ error: "targetPue must be a number ≥ 1." }, 400);
+    }
+    if (body.targetWue !== undefined && !isPositive(body.targetWue)) {
+      return json({ error: "targetWue must be a positive number." }, 400);
+    }
+    if (
+      body.waterBudgetLpm !== undefined &&
+      !(isPositive(body.waterBudgetLpm) && body.waterBudgetLpm >= GUARDRAILS.flowMinLpm)
+    ) {
+      return json({ error: `waterBudgetLpm must be ≥ ${GUARDRAILS.flowMinLpm} L/min.` }, 400);
+    }
+    if (body.powerBudgetMw !== undefined && !isPositive(body.powerBudgetMw)) {
+      return json({ error: "powerBudgetMw must be a positive number." }, 400);
+    }
+    // Σ zone budgets must stay within the facility budget.
+    const facility = await getFacility(env);
+    const nextWater = body.waterBudgetLpm ?? zone.waterBudgetLpm;
+    const nextPower = body.powerBudgetMw ?? zone.powerBudgetMw;
+    const waterSum = allZones.reduce((s, z) => s + (z.id === id ? nextWater : z.waterBudgetLpm), 0);
+    const powerSum = allZones.reduce((s, z) => s + (z.id === id ? nextPower : z.powerBudgetMw), 0);
+    if (waterSum > facility.totalWaterBudgetLpm + 1e-9 || powerSum > facility.totalPowerBudgetMw + 1e-9) {
+      return json({ error: "Zone budgets would exceed the facility budget." }, 422);
+    }
     const patch: Record<string, unknown> = { updatedAt: new Date().toISOString() };
-    if (typeof body.name === "string") patch.name = body.name;
-    if (typeof body.targetPue === "number") patch.targetPue = body.targetPue;
-    if (typeof body.targetWue === "number") patch.targetWue = body.targetWue;
-    if (typeof body.waterBudgetLpm === "number") patch.waterBudgetLpm = body.waterBudgetLpm;
-    if (typeof body.powerBudgetMw === "number") patch.powerBudgetMw = body.powerBudgetMw;
+    if (body.name !== undefined) patch.name = body.name.trim();
+    if (body.targetPue !== undefined) patch.targetPue = body.targetPue;
+    if (body.targetWue !== undefined) patch.targetWue = body.targetWue;
+    if (body.waterBudgetLpm !== undefined) patch.waterBudgetLpm = body.waterBudgetLpm;
+    if (body.powerBudgetMw !== undefined) patch.powerBudgetMw = body.powerBudgetMw;
     await db.update(zones).set(patch).where(eq(zones.id, id));
     return json({ ok: true });
   }
@@ -703,9 +802,24 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (path === "/api/facility" && method === "PATCH") {
     const body = await readBody<{ totalWaterBudgetLpm?: number; totalPowerBudgetMw?: number }>(request);
     if (!body) return json({ error: "body required." }, 400);
+    if (
+      (body.totalWaterBudgetLpm !== undefined && !isPositive(body.totalWaterBudgetLpm)) ||
+      (body.totalPowerBudgetMw !== undefined && !isPositive(body.totalPowerBudgetMw))
+    ) {
+      return json({ error: "Facility budgets must be positive numbers." }, 400);
+    }
+    const allZones = await listZones(env);
+    const waterSum = allZones.reduce((s, z) => s + z.waterBudgetLpm, 0);
+    const powerSum = allZones.reduce((s, z) => s + z.powerBudgetMw, 0);
+    if (
+      (body.totalWaterBudgetLpm ?? Infinity) < waterSum - 1e-9 ||
+      (body.totalPowerBudgetMw ?? Infinity) < powerSum - 1e-9
+    ) {
+      return json({ error: "Facility budget is below the current zone allocations." }, 422);
+    }
     const patch: Record<string, unknown> = { updatedAt: new Date().toISOString() };
-    if (typeof body.totalWaterBudgetLpm === "number") patch.totalWaterBudgetLpm = body.totalWaterBudgetLpm;
-    if (typeof body.totalPowerBudgetMw === "number") patch.totalPowerBudgetMw = body.totalPowerBudgetMw;
+    if (body.totalWaterBudgetLpm !== undefined) patch.totalWaterBudgetLpm = body.totalWaterBudgetLpm;
+    if (body.totalPowerBudgetMw !== undefined) patch.totalPowerBudgetMw = body.totalPowerBudgetMw;
     await db.update(facilityConfig).set(patch).where(eq(facilityConfig.id, 1));
     return json({ ok: true });
   }
@@ -754,21 +868,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const allZones = await listZones(env);
     const zone = allZones.find((z) => z.id === id);
     if (!zone) return json({ error: "Zone not found." }, 404);
-    const rows = await db
-      .select()
-      .from(shadowSamples)
-      .where(eq(shadowSamples.clusterId, id))
-      .orderBy(desc(shadowSamples.id))
-      .limit(1008);
-    const total = rows.length;
-    const feasible = rows.filter((r) => r.feasible === 1).length;
-    const budgetOk = rows.filter((r) => r.budgetOk === 1).length;
-    const meets = rows.filter((r) => r.meetsTarget === 1).length;
-    const avgPueGap = total
-      ? rows.reduce((s, r) => s + Math.max(0, r.predictedPue - zone.targetPue), 0) / total
-      : 0;
-    const feasibleRate = total ? feasible / total : 0;
-    const meetsRate = total ? meets / total : 0;
+    const { rows, total, feasible, budgetOk, meets, feasibleRate, meetsRate, avgPueGap, ready } =
+      await validationStats(env, zone);
     return json({
       zoneId: id,
       hasShadowConfig: zone.shadowSetpoints != null,
@@ -780,7 +881,13 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       feasibleRate: round(feasibleRate, 3),
       meetsRate: round(meetsRate, 3),
       avgPueGap: round(avgPueGap, 4),
-      ready: feasibleRate >= 0.95 && meetsRate >= 0.9,
+      ready,
+      criteria: {
+        minSamples: MIN_VALIDATION_SAMPLES,
+        feasibleRate: VALIDATION_FEASIBLE_RATE,
+        meetsRate: VALIDATION_MEETS_RATE,
+        tolerance: TARGET_TOLERANCE,
+      },
       samples: rows
         .slice()
         .reverse()
@@ -812,13 +919,31 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const allZones = await listZones(env);
     const zone = allZones.find((z) => z.id === body.clusterId);
     if (!zone) return json({ error: "Zone not found." }, 404);
-    // Flip to closed-loop: apply the validated shadow config (if any) as the starting real config.
-    if (body.mode === "closed_loop" && zone.shadowSetpoints) {
+    // Flip to closed-loop: only once shadow validation has passed, then move
+    // toward the validated config through the slew limiter.
+    if (body.mode === "closed_loop" && zone.mode !== "closed_loop") {
+      if (!zone.shadowSetpoints) {
+        return json({ error: "Set a shadow config and validate it before enabling closed-loop." }, 422);
+      }
+      const stats = await validationStats(env, zone);
+      if (!stats.ready) {
+        return json(
+          {
+            error: `Shadow validation has not passed yet (${stats.total}/${MIN_VALIDATION_SAMPLES}+ samples, ${Math.round(stats.feasibleRate * 100)}% feasible, ${Math.round(stats.meetsRate * 100)}% on target).`,
+          },
+          422,
+        );
+      }
+      const { setpoints: start, limited } = applySlewLimits(
+        parseSetpoints(zone.currentSetpoints),
+        parseSetpoints(zone.shadowSetpoints),
+      );
       await db
         .update(zones)
         .set({
           mode: body.mode,
-          currentSetpoints: zone.shadowSetpoints,
+          currentSetpoints: JSON.stringify(start),
+          slewLimited: limited ? 1 : 0,
           updatedAt: new Date().toISOString(),
         })
         .where(eq(zones.id, body.clusterId));
@@ -826,8 +951,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         clusterId: body.clusterId,
         mode: body.mode,
         kind: "applied",
-        setpoints: zone.shadowSetpoints,
-        note: "Closed-loop enabled — validated shadow config applied",
+        setpoints: JSON.stringify(start),
+        note: `Closed-loop enabled — validated shadow config applied${limited ? " (slew-limited first step)" : ""}`,
       });
     } else {
       await db
@@ -857,14 +982,17 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       );
     }
     const kind = zone.mode === "closed_loop" ? "applied" : "would_be";
-    await db
-      .update(zones)
-      .set({
-        currentSetpoints: JSON.stringify(clamped),
-        slewLimited: limited ? 1 : 0,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(zones.id, zone.id));
+    // Shadow mode never writes back to the controllers; it only logs the would-be action.
+    if (kind === "applied") {
+      await db
+        .update(zones)
+        .set({
+          currentSetpoints: JSON.stringify(clamped),
+          slewLimited: limited ? 1 : 0,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(zones.id, zone.id));
+    }
     await db.insert(controlActions).values({
       clusterId: zone.id,
       mode: zone.mode,
@@ -954,6 +1082,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       feasible: proposal.feasible,
       withinFacility,
       violations: proposal.violations,
+      waterDeltaLpm: proposal.waterDeltaLpm,
+      powerDeltaMw: proposal.powerDeltaMw,
       source: proposal.source,
       target: proposal.target,
     });
@@ -971,51 +1101,93 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const rows = await db.select().from(powerTransfers).where(eq(powerTransfers.id, id));
     if (!rows.length) return json({ error: "Transfer not found." }, 404);
     const t = rows[0];
+    // apply/reject are terminal: re-applying would reallocate the budgets twice.
+    if (t.status === "apply" || t.status === "reject") {
+      return json({ error: `Transfer #${id} is already ${t.status === "apply" ? "applied" : "rejected"}.` }, 409);
+    }
 
+    let slewLimited = false;
     if (action === "apply") {
       const allZones = await listZones(env);
       const target = allZones.find((z) => z.id === t.targetId);
       const source = allZones.find((z) => z.id === t.sourceId);
-      if (target && source) {
-        await db
-          .update(zones)
-          .set({
-            currentSetpoints: t.targetSetpoints,
-            waterBudgetLpm: round(Math.max(0, target.waterBudgetLpm + t.waterDeltaLpm), 1),
-            powerBudgetMw: round(Math.max(0, target.powerBudgetMw + t.powerDeltaMw), 3),
-            updatedAt: new Date().toISOString(),
-          })
-          .where(eq(zones.id, t.targetId));
-        await db
-          .update(zones)
-          .set({
-            currentSetpoints: t.sourceSetpoints,
-            waterBudgetLpm: round(Math.max(0, source.waterBudgetLpm - t.waterDeltaLpm), 1),
-            powerBudgetMw: round(Math.max(0, source.powerBudgetMw - t.powerDeltaMw), 3),
-            updatedAt: new Date().toISOString(),
-          })
-          .where(eq(zones.id, t.sourceId));
-        await db.insert(controlActions).values({
-          clusterId: target.id,
-          mode: target.mode,
-          kind: target.mode === "closed_loop" ? "applied" : "would_be",
-          setpoints: t.targetSetpoints,
-          note: `Cooling transfer #${id} from ${source.name} (+${t.waterDeltaLpm} L/min, +${t.powerDeltaMw} MW)`,
-        });
-        await db.insert(controlActions).values({
-          clusterId: source.id,
-          mode: source.mode,
-          kind: source.mode === "closed_loop" ? "applied" : "would_be",
-          setpoints: t.sourceSetpoints,
-          note: `Cooling transfer #${id} to ${target.name} (−${t.waterDeltaLpm} L/min, −${t.powerDeltaMw} MW)`,
-        });
+      if (!target || !source) return json({ error: "Zone not found." }, 404);
+      // The proposal may be stale: re-check guardrails on live telemetry and move
+      // through the slew limiter like every other setpoint write.
+      const targetStep = applySlewLimits(parseSetpoints(target.currentSetpoints), parseSetpoints(t.targetSetpoints));
+      const sourceStep = applySlewLimits(parseSetpoints(source.currentSetpoints), parseSetpoints(t.sourceSetpoints));
+      const violations = [
+        ...evaluateGuardrails(predict(await latestTelemetryForZone(env, target), targetStep.setpoints)).violations,
+        ...evaluateGuardrails(predict(await latestTelemetryForZone(env, source), sourceStep.setpoints)).violations,
+      ];
+      if (violations.length) {
+        return json({ error: "Transfer would now violate hard guardrails.", violations }, 422);
       }
+      slewLimited = targetStep.limited || sourceStep.limited;
+      await db
+        .update(zones)
+        .set({
+          currentSetpoints: JSON.stringify(targetStep.setpoints),
+          slewLimited: targetStep.limited ? 1 : 0,
+          waterBudgetLpm: round(Math.max(0, target.waterBudgetLpm + t.waterDeltaLpm), 1),
+          powerBudgetMw: round(Math.max(0, target.powerBudgetMw + t.powerDeltaMw), 3),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(zones.id, t.targetId));
+      await db
+        .update(zones)
+        .set({
+          currentSetpoints: JSON.stringify(sourceStep.setpoints),
+          slewLimited: sourceStep.limited ? 1 : 0,
+          waterBudgetLpm: round(Math.max(0, source.waterBudgetLpm - t.waterDeltaLpm), 1),
+          powerBudgetMw: round(Math.max(0, source.powerBudgetMw - t.powerDeltaMw), 3),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(zones.id, t.sourceId));
+      await db.insert(controlActions).values({
+        clusterId: target.id,
+        mode: target.mode,
+        kind: "applied",
+        setpoints: JSON.stringify(targetStep.setpoints),
+        note: `Cooling transfer #${id} from ${source.name} (+${t.waterDeltaLpm} L/min, +${t.powerDeltaMw} MW)`,
+      });
+      await db.insert(controlActions).values({
+        clusterId: source.id,
+        mode: source.mode,
+        kind: "applied",
+        setpoints: JSON.stringify(sourceStep.setpoints),
+        note: `Cooling transfer #${id} to ${target.name} (−${t.waterDeltaLpm} L/min, −${t.powerDeltaMw} MW)`,
+      });
     }
     await db
       .update(powerTransfers)
       .set({ status: action })
       .where(eq(powerTransfers.id, id));
-    return json({ ok: true, status: action });
+    return json({ ok: true, status: action, slewLimited });
+  }
+
+  // --- Sensors ---------------------------------------------------------------
+  if (path === "/api/sensors" && method === "GET") {
+    const windowTicks = clamp(Math.round(Number(url.searchParams.get("window")) || 36), 6, 144);
+    const allZones = await listZones(env);
+    const out = await Promise.all(
+      allZones.map(async (z) => {
+        const rows = await db
+          .select({ payload: telemetrySamples.payload })
+          .from(telemetrySamples)
+          .where(eq(telemetrySamples.clusterId, z.id))
+          .orderBy(desc(telemetrySamples.tick))
+          .limit(windowTicks);
+        const samples = rows.reverse().map((r) => JSON.parse(r.payload) as StoredSample);
+        return {
+          zoneId: z.id,
+          name: z.name,
+          ticks: samples.map((s) => s.tick),
+          sensors: sensorReadings(z.id, samples),
+        };
+      }),
+    );
+    return json({ windowTicks, zones: out });
   }
 
   // --- Model metrics ---------------------------------------------------------
@@ -1050,7 +1222,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       const proposal = proposeTransfer(toCtx(target, tT), toCtx(source, sT), 100, 0.1);
       if (!proposal.source.feasible) issues.push("source proposal infeasible");
       if (!proposal.target.feasible) issues.push("target proposal infeasible");
-      if (proposal.source.prediction.flowLpm < 399 || proposal.source.prediction.flowLpm > 1750) {
+      if (proposal.source.prediction.flowLpm < GUARDRAILS.flowMinLpm || proposal.source.prediction.flowLpm > 1750) {
         issues.push("source flow out of guardrail bounds");
       }
       if (!proposal.source.withinBudget) issues.push("source proposal exceeds its own budget");

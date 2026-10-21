@@ -10,6 +10,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "node scripts/twin.check.mjs && node worker/telegram.check.mjs",
     "preview": "vite preview",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
@@ -18,11 +19,13 @@
     "db:seed:remote": "wrangler d1 execute DB --remote --file=./seeds/local.sql"
   },
   "dependencies": {
+    "@react-three/fiber": "^9.8.2",
     "@tanstack/react-router": "latest",
     "drizzle-orm": "^0.45.2",
     "lucide-react": "^0.577.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.16.1",
@@ -30,6 +33,7 @@
     "@tailwindcss/vite": "^4.1.18",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^6.0.1",
     "drizzle-kit": "^0.31.10",
     "tailwindcss": "^4.1.18",

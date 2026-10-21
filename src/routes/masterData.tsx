@@ -1,294 +1,334 @@
 import { createRoute } from "@tanstack/react-router";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { AlertTriangle, Building2, Check, Droplets, Layers, Loader2, RotateCcw, ShieldCheck, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useToast } from "../components/Toast";
-import { Panel } from "../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  cx,
+  ErrorState,
+  Meter,
+  NumberField,
+  PageHeader,
+  Skeleton,
+  Table,
+  Td,
+  Th,
+  usageTone,
+} from "../components/ui";
 import { api, type FacilityConfigResponse, type ZoneConfigResponse } from "../lib/api";
 import { GUARDRAILS } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
-interface ZoneDraft {
-  targetPue: number;
-  targetWue: number;
-  waterBudgetLpm: number;
-  powerBudgetMw: number;
+type ZoneKey = "targetPue" | "targetWue" | "waterBudgetLpm" | "powerBudgetMw";
+type FacilityKey = "totalWaterBudgetLpm" | "totalPowerBudgetMw";
+
+const ZONE_FIELDS: { key: ZoneKey; label: string; suffix?: string }[] = [
+  { key: "targetPue", label: "Target PUE" },
+  { key: "targetWue", label: "Target WUE", suffix: "L/kWh" },
+  { key: "waterBudgetLpm", label: "Water budget", suffix: "L/min" },
+  { key: "powerBudgetMw", label: "Power budget", suffix: "MW" },
+];
+
+function zoneFieldError(key: ZoneKey, v: number): string | undefined {
+  if (!Number.isFinite(v)) return "Enter a number.";
+  if (key === "targetPue" && v < 1) return "PUE can't be below 1.";
+  if (key === "waterBudgetLpm" && v < GUARDRAILS.flowMinLpm) return `Min ${GUARDRAILS.flowMinLpm} L/min (loop flow floor).`;
+  if (v <= 0) return "Must be positive.";
+  return undefined;
 }
 
-interface FacilityDraft {
-  totalWaterBudgetLpm: number;
-  totalPowerBudgetMw: number;
-}
-
-function Field({
+function Allocation({
+  icon: Icon,
   label,
-  value,
-  onChange,
-  error,
-  step = "0.01",
+  used,
+  total,
+  unit,
+  digits,
 }: {
+  icon: typeof Zap;
   label: string;
-  value: string;
-  onChange: (v: string) => void;
-  error?: string;
-  step?: string;
+  used: number;
+  total: number;
+  unit: string;
+  digits: number;
 }) {
+  const pct = total > 0 ? (used / total) * 100 : 0;
+  const tone = usageTone(pct);
   return (
-    <label className="block text-xs">
-      <span className="text-slate-400">{label}</span>
-      <input
-        type="number"
-        step={step}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-invalid={error != null}
-        className={`mt-1 w-full rounded-lg border bg-slate-900 px-2 py-1.5 font-mono text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-          error ? "border-red-500/60" : "border-slate-700"
-        }`}
-      />
-      {error ? <span className="mt-1 block text-[11px] text-red-300">{error}</span> : null}
-    </label>
+    <div className="rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line">
+      <div className="flex items-center justify-between">
+        <p className="flex items-center gap-1.5 text-xs font-medium text-fg-muted">
+          <Icon className="h-3.5 w-3.5" aria-hidden /> {label}
+        </p>
+        <span className={cx("text-xs font-medium tabular-nums", pct > 100 ? "text-crit" : "text-fg-subtle")}>{Math.round(pct)}% allocated</span>
+      </div>
+      <p className="mt-2 text-lg font-semibold tabular-nums text-fg">
+        {used.toLocaleString(undefined, { maximumFractionDigits: digits })}
+        <span className="text-sm font-normal text-fg-subtle">
+          {" "}
+          / {total.toLocaleString(undefined, { maximumFractionDigits: digits })} {unit}
+        </span>
+      </p>
+      <Meter value={pct} tone={tone} className="mt-2" label={`${label} allocated to zones`} />
+      <p className="mt-1.5 text-[11px] text-fg-faint">
+        {pct > 100
+          ? "Zone budgets exceed the facility total."
+          : `${(total - used).toLocaleString(undefined, { maximumFractionDigits: digits })} ${unit} unallocated`}
+      </p>
+    </div>
   );
 }
 
 function MasterDataPage() {
   const toast = useToast();
-  const [zones, setZones] = useState<ZoneConfigResponse[]>([]);
+  const [zones, setZones] = useState<ZoneConfigResponse[] | null>(null);
   const [facility, setFacility] = useState<FacilityConfigResponse | null>(null);
-  const [selectedId, setSelectedId] = useState(1);
-  const [draft, setDraft] = useState<ZoneDraft | null>(null);
-  const [facilityDraft, setFacilityDraft] = useState<FacilityDraft | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<number, Partial<Record<ZoneKey, string>>>>({});
+  const [facilityDraft, setFacilityDraft] = useState<Partial<Record<FacilityKey, string>>>({});
+  const [saving, setSaving] = useState<number | "facility" | null>(null);
 
   const load = useCallback(async () => {
     try {
       const [z, f] = await Promise.all([api.listZones(), api.getFacility()]);
       setZones(z.zones);
       setFacility(f);
+      setError(null);
     } catch (e) {
-      toast(e instanceof Error ? e.message : "Failed to load config.", "error");
+      setError(e instanceof Error ? e.message : "Failed to load configuration.");
     }
-  }, [toast]);
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  // Reset the draft whenever the selected zone changes.
-  useEffect(() => {
-    setDraft(null);
-  }, [selectedId]);
+  // Resolved value of a zone field: the draft if parseable, else the saved value.
+  const zoneValue = useCallback(
+    (z: ZoneConfigResponse, key: ZoneKey) => {
+      const d = drafts[z.id]?.[key];
+      return d !== undefined ? Number(d) : z[key];
+    },
+    [drafts],
+  );
 
-  const zone = zones.find((z) => z.id === selectedId);
-  const base: ZoneDraft | null = zone
-    ? {
-        targetPue: zone.targetPue,
-        targetWue: zone.targetWue,
-        waterBudgetLpm: zone.waterBudgetLpm,
-        powerBudgetMw: zone.powerBudgetMw,
-      }
-    : null;
-  const current = draft ?? base;
+  const sums = useMemo(() => {
+    if (!zones) return { water: 0, power: 0 };
+    const val = (n: number, fallback: number) => (Number.isFinite(n) ? n : fallback);
+    return {
+      water: zones.reduce((s, z) => s + val(zoneValue(z, "waterBudgetLpm"), z.waterBudgetLpm), 0),
+      power: zones.reduce((s, z) => s + val(zoneValue(z, "powerBudgetMw"), z.powerBudgetMw), 0),
+    };
+  }, [zones, zoneValue]);
 
-  const num = (v: string, fallback: number) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  };
-
-  // --- Field-level validation on the current draft ---
-  const fieldErrors = useMemo(() => {
-    if (!current) return {};
-    const e: Record<string, string> = {};
-    if (current.targetPue <= 0) e.targetPue = "Must be a positive number.";
-    if (current.targetWue <= 0) e.targetWue = "Must be a positive number.";
-    if (current.waterBudgetLpm < GUARDRAILS.flowMinLpm)
-      e.waterBudgetLpm = `Must be ≥ ${GUARDRAILS.flowMinLpm} L/min (required min flow).`;
-    if (current.powerBudgetMw <= 0) e.powerBudgetMw = "Must be a positive number.";
-    return e;
-  }, [current]);
-
-  // --- Facility-level conflict check (Σ zone budgets ≤ facility budget) ---
-  const budgetConflict = useMemo(() => {
-    if (!facility) return null;
-    const waterSum = zones.reduce(
-      (s, z) => s + (z.id === selectedId && current ? current.waterBudgetLpm : z.waterBudgetLpm),
-      0,
+  if (error) return <ErrorState message={error} onRetry={() => void load()} />;
+  if (!zones || !facility) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-14 w-80" />
+        <Skeleton className="h-56" />
+        <Skeleton className="h-72" />
+      </div>
     );
-    const powerSum = zones.reduce(
-      (s, z) => s + (z.id === selectedId && current ? current.powerBudgetMw : z.powerBudgetMw),
-      0,
-    );
-    const waterTotal = facilityDraft?.totalWaterBudgetLpm ?? facility.totalWaterBudgetLpm;
-    const powerTotal = facilityDraft?.totalPowerBudgetMw ?? facility.totalPowerBudgetMw;
-    const issues: string[] = [];
-    if (waterSum > waterTotal) issues.push(`Σ zone water (${waterSum.toLocaleString()} L/min) exceeds total water budget (${waterTotal.toLocaleString()} L/min).`);
-    if (powerSum > powerTotal) issues.push(`Σ zone power (${powerSum.toFixed(2)} MW) exceeds total power budget (${powerTotal.toFixed(2)} MW).`);
-    return issues;
-  }, [zones, selectedId, current, facility, facilityDraft]);
+  }
 
-  const zoneValid = draft != null && Object.keys(fieldErrors).length === 0;
-  const facilityValid =
-    facilityDraft != null && facilityDraft.totalWaterBudgetLpm > 0 && facilityDraft.totalPowerBudgetMw > 0;
+  const facWater = facilityDraft.totalWaterBudgetLpm !== undefined ? Number(facilityDraft.totalWaterBudgetLpm) : facility.totalWaterBudgetLpm;
+  const facPower = facilityDraft.totalPowerBudgetMw !== undefined ? Number(facilityDraft.totalPowerBudgetMw) : facility.totalPowerBudgetMw;
+  const savedWater = zones.reduce((s, z) => s + z.waterBudgetLpm, 0);
+  const savedPower = zones.reduce((s, z) => s + z.powerBudgetMw, 0);
+  const facilityErrors: Partial<Record<FacilityKey, string>> = {};
+  if (!(facWater > 0)) facilityErrors.totalWaterBudgetLpm = "Must be positive.";
+  else if (facWater < savedWater) facilityErrors.totalWaterBudgetLpm = `Below zone allocations (${savedWater.toLocaleString()} L/min).`;
+  if (!(facPower > 0)) facilityErrors.totalPowerBudgetMw = "Must be positive.";
+  else if (facPower < savedPower - 1e-9) facilityErrors.totalPowerBudgetMw = `Below zone allocations (${savedPower.toFixed(2)} MW).`;
+  const facilityDirty = Object.keys(facilityDraft).length > 0;
+  const overAllocated = sums.water > facWater || sums.power > facPower + 1e-9;
 
-  const saveZone = async () => {
-    if (!zone || !draft) return;
-    if (!zoneValid) return;
-    if (budgetConflict?.length) {
-      toast(budgetConflict[0], "error");
-      return;
-    }
+  const saveZone = async (z: ZoneConfigResponse) => {
+    const d = drafts[z.id];
+    if (!d) return;
+    const patch: Partial<Record<ZoneKey, number>> = {};
+    for (const [k, v] of Object.entries(d) as [ZoneKey, string][]) patch[k] = Number(v);
+    setSaving(z.id);
     try {
-      await api.patchZone(zone.id, draft);
-      toast("✓ Zone configuration saved.", "success");
+      await api.patchZone(z.id, patch);
+      toast(`${z.name} saved.`, "success");
+      setDrafts((prev) => {
+        const next = { ...prev };
+        delete next[z.id];
+        return next;
+      });
       await load();
-      setDraft(null);
     } catch (e) {
       toast(e instanceof Error ? e.message : "Save failed.", "error");
+    } finally {
+      setSaving(null);
     }
   };
 
   const saveFacility = async () => {
-    if (!facilityDraft) return;
-    if (!facilityValid) {
-      toast("Total budgets must be positive numbers.", "error");
-      return;
-    }
-    // Facility budget must cover the zone allocations.
-    const waterSum = zones.reduce((s, z) => s + (z.id === selectedId && current ? current.waterBudgetLpm : z.waterBudgetLpm), 0);
-    const powerSum = zones.reduce((s, z) => s + (z.id === selectedId && current ? current.powerBudgetMw : z.powerBudgetMw), 0);
-    if (facilityDraft.totalWaterBudgetLpm < waterSum || facilityDraft.totalPowerBudgetMw < powerSum) {
-      toast("Facility budget is below the current zone allocations.", "error");
-      return;
-    }
+    setSaving("facility");
     try {
-      await api.patchFacility(facilityDraft);
-      toast("✓ Facility budget saved.", "success");
+      await api.patchFacility({ totalWaterBudgetLpm: facWater, totalPowerBudgetMw: facPower });
+      toast("Facility budgets saved.", "success");
+      setFacilityDraft({});
       await load();
-      setFacilityDraft(null);
     } catch (e) {
       toast(e instanceof Error ? e.message : "Save failed.", "error");
+    } finally {
+      setSaving(null);
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Page header */}
-      <div className="pt-2">
-        <h1 className="text-xl font-semibold">Master Data</h1>
-        <p className="text-sm text-slate-400">Zone targets &amp; budgets, plus facility-wide water and power budgets</p>
-      </div>
+    <div className="animate-fade-up space-y-8">
+      <PageHeader
+        title="Master data"
+        description="Targets and budgets that act as hard constraints across optimisation, transfer and validation."
+      />
 
-      {/* Zone targets & budgets */}
-      <Panel title="Zone targets & budgets">
-        <p className="mb-3 text-sm text-slate-400">
-          Configure the operational target and resource limits for each zone.
-        </p>
-
-        <div className="flex flex-wrap gap-2" role="tablist" aria-label="Zones">
-          {zones.map((z) => (
-            <button
-              key={z.id}
-              type="button"
-              role="tab"
-              aria-selected={selectedId === z.id}
-              onClick={() => setSelectedId(z.id)}
-              className={`rounded-lg border px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-                selectedId === z.id
-                  ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.15)]"
-                  : "border-slate-700 text-slate-300 hover:bg-slate-800"
-              }`}
-            >
-              {z.name}
-            </button>
-          ))}
-        </div>
-
-        {current ? (
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Field
-              label="Target PUE"
-              value={String(current.targetPue)}
-              error={fieldErrors.targetPue}
-              onChange={(v) => setDraft({ ...current, targetPue: num(v, current.targetPue) })}
-            />
-            <Field
-              label="Target WUE"
-              value={String(current.targetWue)}
-              error={fieldErrors.targetWue}
-              onChange={(v) => setDraft({ ...current, targetWue: num(v, current.targetWue) })}
-            />
-            <Field
-              label="Water budget (L/min)"
-              value={String(current.waterBudgetLpm)}
-              step="1"
-              error={fieldErrors.waterBudgetLpm}
-              onChange={(v) => setDraft({ ...current, waterBudgetLpm: num(v, current.waterBudgetLpm) })}
-            />
-            <Field
-              label="Power budget (MW)"
-              value={String(current.powerBudgetMw)}
-              error={fieldErrors.powerBudgetMw}
-              onChange={(v) => setDraft({ ...current, powerBudgetMw: num(v, current.powerBudgetMw) })}
-            />
+      <Card title="Facility budgets" description="Total resources the zones are allocated from" icon={Building2}>
+        <div className="grid gap-6 xl:grid-cols-[1fr_320px]">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Allocation icon={Droplets} label="Water" used={sums.water} total={facWater} unit="L/min" digits={0} />
+            <Allocation icon={Zap} label="Accessory power" used={sums.power} total={facPower} unit="MW" digits={2} />
           </div>
-        ) : null}
+          <div className="space-y-3">
+            <NumberField
+              label="Total water"
+              suffix="L/min"
+              value={facilityDraft.totalWaterBudgetLpm ?? String(facility.totalWaterBudgetLpm)}
+              dirty={facilityDraft.totalWaterBudgetLpm !== undefined}
+              error={facilityErrors.totalWaterBudgetLpm}
+              onChange={(v) => setFacilityDraft((p) => ({ ...p, totalWaterBudgetLpm: v }))}
+            />
+            <NumberField
+              label="Total power"
+              suffix="MW"
+              value={facilityDraft.totalPowerBudgetMw ?? String(facility.totalPowerBudgetMw)}
+              dirty={facilityDraft.totalPowerBudgetMw !== undefined}
+              error={facilityErrors.totalPowerBudgetMw}
+              onChange={(v) => setFacilityDraft((p) => ({ ...p, totalPowerBudgetMw: v }))}
+            />
+            <div className="flex gap-2 pt-1">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void saveFacility()}
+                disabled={!facilityDirty || Object.keys(facilityErrors).length > 0 || saving !== null}
+              >
+                {saving === "facility" ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Check className="h-3.5 w-3.5" aria-hidden />}
+                Save facility
+              </Button>
+              {facilityDirty ? (
+                <Button variant="ghost" size="sm" onClick={() => setFacilityDraft({})}>
+                  Reset
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </Card>
 
-        {budgetConflict?.length ? (
-          <p className="mt-3 flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+      <Card title="Zones" description="Operational targets and resource limits per zone" icon={Layers}>
+        {overAllocated ? (
+          <p className="mb-4 flex items-start gap-2 rounded-xl bg-warn/10 px-3 py-2.5 text-xs text-warn ring-1 ring-inset ring-warn/25">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-            {budgetConflict.join(" ")}
+            Σ zone budgets exceed the facility budget ({Math.round(sums.water).toLocaleString()} / {facWater.toLocaleString()} L/min ·{" "}
+            {sums.power.toFixed(2)} / {facPower.toFixed(2)} MW). Lower a zone budget or raise the facility total first.
           </p>
         ) : null}
+        <Table minWidth={760}>
+          <thead>
+            <tr>
+              <Th>Zone</Th>
+              {ZONE_FIELDS.map((f) => (
+                <Th key={f.key}>
+                  {f.label}
+                  {f.suffix ? <span className="ml-1 normal-case tracking-normal text-fg-faint">({f.suffix})</span> : null}
+                </Th>
+              ))}
+              <Th className="text-right">Actions</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {zones.map((z) => {
+              const d = drafts[z.id];
+              const dirty = d != null && Object.keys(d).length > 0;
+              const errors = Object.fromEntries(
+                ZONE_FIELDS.map((f) => [f.key, d?.[f.key] !== undefined ? zoneFieldError(f.key, Number(d[f.key])) : undefined]),
+              ) as Record<ZoneKey, string | undefined>;
+              const valid = Object.values(errors).every((e) => !e);
+              return (
+                <tr key={z.id} className={cx(dirty && "bg-accent/[0.03]")}>
+                  <Td className="w-40">
+                    <p className="font-medium text-fg">{z.name}</p>
+                    <Badge tone={z.mode === "closed_loop" ? "accent" : "neutral"} className="mt-1">
+                      {z.mode === "closed_loop" ? "Closed-loop" : "Shadow"}
+                    </Badge>
+                  </Td>
+                  {ZONE_FIELDS.map((f) => (
+                    <Td key={f.key} className="align-top">
+                      <div className="w-28">
+                        <NumberField
+                          label={`${z.name} ${f.label}`}
+                          hideLabel
+                          value={d?.[f.key] ?? String(z[f.key])}
+                          dirty={d?.[f.key] !== undefined}
+                          error={errors[f.key]}
+                          onChange={(v) =>
+                            setDrafts((prev) => {
+                              const row = { ...prev[z.id] };
+                              if (v === String(z[f.key])) delete row[f.key];
+                              else row[f.key] = v;
+                              return { ...prev, [z.id]: row };
+                            })
+                          }
+                        />
+                      </div>
+                    </Td>
+                  ))}
+                  <Td className="text-right align-middle">
+                    <div className="flex justify-end gap-1.5">
+                      {dirty ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-label={`Reset ${z.name}`}
+                          onClick={() =>
+                            setDrafts((prev) => {
+                              const next = { ...prev };
+                              delete next[z.id];
+                              return next;
+                            })
+                          }
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" aria-hidden />
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant={dirty ? "primary" : "secondary"}
+                        size="sm"
+                        onClick={() => void saveZone(z)}
+                        disabled={!dirty || !valid || overAllocated || saving !== null}
+                      >
+                        {saving === z.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+                        Save
+                      </Button>
+                    </div>
+                  </Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </Table>
+      </Card>
 
-        <button
-          type="button"
-          onClick={() => void saveZone()}
-          disabled={!draft || !zoneValid}
-          className="mt-4 rounded-lg bg-cyan-500 px-4 py-1.5 text-sm font-semibold text-slate-950 hover:bg-cyan-400 focus-visible:outline-2 focus-visible:outline-cyan-300 disabled:opacity-50"
-        >
-          Save zone
-        </button>
-      </Panel>
-
-      {/* Facility budgets */}
-      <Panel title="Facility budgets">
-        <p className="mb-3 text-sm text-slate-400">Configure the total resource limits for the entire facility.</p>
-        {facility ? (
-          <div className="grid grid-cols-2 gap-3">
-            <Field
-              label="Total water (L/min)"
-              step="1"
-              value={String(facilityDraft?.totalWaterBudgetLpm ?? facility.totalWaterBudgetLpm)}
-              onChange={(v) =>
-                setFacilityDraft({
-                  ...(facilityDraft ?? { totalWaterBudgetLpm: facility.totalWaterBudgetLpm, totalPowerBudgetMw: facility.totalPowerBudgetMw }),
-                  totalWaterBudgetLpm: num(v, facility.totalWaterBudgetLpm),
-                })
-              }
-            />
-            <Field
-              label="Total power (MW)"
-              value={String(facilityDraft?.totalPowerBudgetMw ?? facility.totalPowerBudgetMw)}
-              onChange={(v) =>
-                setFacilityDraft({
-                  ...(facilityDraft ?? { totalWaterBudgetLpm: facility.totalWaterBudgetLpm, totalPowerBudgetMw: facility.totalPowerBudgetMw }),
-                  totalPowerBudgetMw: num(v, facility.totalPowerBudgetMw),
-                })
-              }
-            />
-          </div>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => void saveFacility()}
-          disabled={!facilityDraft || !facilityValid}
-          className="mt-4 rounded-lg bg-cyan-500 px-4 py-1.5 text-sm font-semibold text-slate-950 hover:bg-cyan-400 focus-visible:outline-2 focus-visible:outline-cyan-300 disabled:opacity-50"
-        >
-          Save facility
-        </button>
-      </Panel>
-
-      <p className="flex items-center gap-1.5 py-2 text-center text-xs text-slate-500">
-        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden />
-        DCFlex uses these values as operational targets and hard constraints across optimization, transfer, and validation.
+      <p className="flex items-center justify-center gap-1.5 text-center text-xs text-fg-faint">
+        <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
+        Changes are validated server-side against guardrails and facility totals.
       </p>
     </div>
   );

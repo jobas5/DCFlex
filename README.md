@@ -14,6 +14,7 @@ Data-center operators must keep chips thermally safe while minimizing two compet
 ## Features
 
 - **Overview** — facility-level KPIs (PUE, WUE, IT load, accessory power, thermal margin), per-zone monitoring cards, and time-range trend charts.
+- **Facility 3D** — an orbitable three.js model of each zone's cooling loop (racks, CDU, chiller, cooling tower, piping) with all 40 sensors placed on it; click one for its live reading, guardrail, trend and data-quality history.
 - **What-If Engine** — grid-search **1,560 setpoint permutations** under hard guardrails, ranked by J = α·PUE + β·WUE; results persist and are shareable at `/optimize/<runId>`.
 - **Shadow Validation** — validate a recommended scenario against live telemetry before enabling closed-loop control (Analyze → Shadow → Validate → Closed-loop).
 - **Cooling Transfer** — reallocate water flow and chiller power from a safe zone to a hot zone, with live impact preview and budget reallocation on apply.
@@ -21,7 +22,8 @@ Data-center operators must keep chips thermally safe while minimizing two compet
 - **Master Data** — single source of truth for zone targets/budgets and facility budgets, with validation against guardrails and facility totals.
 - **Authentication** — single-account username/password login (PBKDF2 + signed session cookie).
 - **Telegram alerts** — optional edge-triggered notifications for guardrail violations, fail-safes, and thermal-forecast warnings.
-- **Hard guardrails everywhere** — T_chip ≤ 85°C, ΔP 60–240 kPa, flow 400–1600 L/min.
+- **Hard guardrails everywhere** — T_chip ≤ 85°C, ΔP 60–240 kPa, flow 400–1600 L/min; the optimizer also keeps a 5°C thermal-margin reserve.
+- **Modern UI** — Geist type, token-based design system, dark and light themes, responsive down to phone width.
 
 ## Quick start
 
@@ -32,13 +34,16 @@ npm run db:seed:local
 npm run dev
 ```
 
-Then open the printed local URL. Default dev login: **`admin` / `dcflex12`** (override via auth secrets — see Configuration).
+Login needs the auth secrets in a local `.dev.vars` (gitignored) — see [Secrets](#secrets-devvars-locally-wrangler-secret-put-in-production) for the one-liners. The documented dev login is **`admin` / `dcflex12`**: set `AUTH_USERNAME=admin` and `AUTH_PASSWORD_HASH` to the hash of `dcflex12`. Without the secrets, login fails closed.
+
+Local dev has no cron trigger, so the simulation only advances when you press **Run** in the top bar. If no tick arrives for 90 s, the watchdog fail-safes every zone back to factory setpoints (and disengages closed-loop) — exactly as it would in production if the cron stopped.
 
 ## Usage
 
 | Screen | Route | What it does |
 | --- | --- | --- |
 | **Overview** | `/` | Facility KPIs, zone status cards, per-zone monitoring with trend charts and a time-range selector. |
+| **Facility 3D** | `/facility` | 3D cooling-loop model with sensor markers coloured by health; sensor list, detail panel, deep links via `?sensor=<zoneId>:<kind>`. |
 | **Optimization** | `/optimize` | What-If Engine: set α/β weights + scenario, run the grid search, review summary/recommended action/zone performance, and start shadow validation. |
 | **Shadow Validation** | `/shadow` | Validate a scenario against live telemetry; Auto follows the what-if recommendation, Manual lets you edit setpoints, then enable closed-loop. |
 | **Cooling Transfer** | `/transfer` | Reallocate water/power between a source and target zone with live before→after impact. |
@@ -102,6 +107,7 @@ Full endpoint reference: see **[API.md](API.md)**. For the complete technical re
 npm install
 npm run dev            # frontend + Worker API + local D1
 npm run typecheck      # tsc --noEmit
+npm run check          # twin invariants + alert-logic regression checks (node:assert)
 npm run build          # production client + Worker into dist/
 npm run preview        # preview the production build
 
@@ -137,18 +143,22 @@ Migrate and seed the remote database first (`npm run db:migrate:remote` + `npm r
 │   └── telegram.check.mjs    # runnable self-check for alertLogic
 ├── src/
 │   ├── main.tsx              # Router setup and app bootstrap
-│   ├── styles.css            # Tailwind v4 entry + theme tokens + keyframes
-│   ├── routes/               # root, overview, optimize, optimizeDetail, shadow,
+│   ├── styles.css            # Tailwind v4 entry + semantic theme tokens + keyframes
+│   ├── routes/               # root (shell), overview, optimize, optimizeDetail, shadow,
 │   │                         #   transfer, model, masterData, login, notFound
-│   ├── components/           # LineChart, StatusBar, Toast, ui (Panel, KpiCard, badges…)
+│   ├── components/           # ui (Card, KpiTile, Badge, Button, Segmented, Slider…),
+│   │                         #   LineChart + Sparkline, Topbar, Toast,
+│   │                         #   facility/ (lazy three.js scene + 3D layout)
 │   ├── lib/
 │   │   ├── api.ts            # Typed fetch client for /api/*
 │   │   ├── auth.tsx          # AuthProvider / useAuth
 │   │   ├── simContext.tsx    # Live telemetry polling provider
+│   │   ├── theme.tsx         # Dark/light theme provider
+│   │   ├── nav.ts            # Navigation groups (sidebar, mobile bar, breadcrumb)
 │   │   ├── time.ts           # Sim-time formatting (WIB)
-│   │   ├── tokens.ts         # Chart/severity color tokens
+│   │   ├── tokens.ts         # Chart/severity colors as CSS variables
 │   │   └── twin/             # simulator, surrogate, optimizer, forecast, transfer,
-│   │                         #   modelMeta, modelInsights, types
+│   │                         #   sensors, modelMeta, modelInsights, types
 │   └── db/
 │       ├── schema.ts         # Drizzle schema (zones, facility_config, telemetry_samples,
 │       │                     #   whatif_runs, whatif_candidates, control_actions,

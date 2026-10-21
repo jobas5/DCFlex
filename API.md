@@ -42,7 +42,8 @@ curl -b cookies.txt http://localhost:5173/api/telemetry/current
 | `400` | Missing/invalid request body or parameters |
 | `401` | Unauthenticated (no/invalid session) or bad login |
 | `404` | Resource (zone, run, transfer) not found |
-| `422` | Guardrail or budget violation |
+| `409` | Transfer already in a terminal state (applied/rejected) |
+| `422` | Guardrail, budget or validation-gate violation |
 | `429` | Login rate-limited |
 | `500` | Internal error |
 
@@ -67,7 +68,7 @@ Verify credentials and set the session cookie. **Public.**
 - `200` — `{ "ok": true }` (+ `Set-Cookie: dcflex_session=...` header)
 - `400` — missing username/password
 - `401` — invalid credentials
-- `429` — too many attempts (rate-limited)
+- `429` — too many failed attempts (>10 per minute per IP; a successful login resets the counter)
 - `500` — auth secrets not configured
 
 ### `POST /api/auth/logout`
@@ -176,6 +177,8 @@ Run a counterfactual grid search. Persists the run and its top-25 candidates.
 
 `WhatIfCandidate`: `setpoints`, `pue`, `wue`, `cost`, `chipTempC`, `deltaPKpa`, `flowLpm`, `accessoryPowerMw`, `feasible`, `violations`.
 
+A candidate is feasible only if it passes every hard guardrail **and** keeps a 5 °C thermal-margin operating reserve (violation code `THERMAL_MARGIN`).
+
 - `400` if `alpha`/`beta` missing; `404` if `zoneId` not found.
 
 ### `GET /api/whatif`
@@ -190,7 +193,7 @@ List the 20 most recent runs (metadata only).
 
 ### `GET /api/whatif/{id}`
 
-Full detail for one run, including its persisted candidates (re-sorted feasible-first, then by cost).
+Full detail for one run, including its persisted candidates (re-sorted feasible-first, then by cost). `deltaPKpa`, `flowLpm` and `accessoryPowerMw` are not persisted and come back as `0`; infeasible candidates have `cost: null`.
 
 **Response** — `WhatIfResponse` plus `createdAt`, `baseSetpoints`, `status`.
 
@@ -222,6 +225,10 @@ Update zone targets/budgets/name. Any subset of fields may be sent.
 
 **Response** — `{ "ok": true }`
 
+- `400` invalid value (`targetPue` must be ≥ 1, `targetWue`/`powerBudgetMw` positive, `waterBudgetLpm` ≥ 400, `name` non-empty)
+- `404` zone not found
+- `422` the new budgets would make Σ zone budgets exceed the facility budget
+
 ### `GET /api/zones/{id}/validation`
 
 Shadow-validation statistics for a zone.
@@ -239,11 +246,14 @@ Shadow-validation statistics for a zone.
   "meets": 50,
   "feasibleRate": 1.0,
   "meetsRate": 0.88,
-  "avgPueGap": -0.007,
+  "avgPueGap": 0.0,
   "ready": false,
+  "criteria": { "minSamples": 6, "feasibleRate": 0.95, "meetsRate": 0.9, "tolerance": 0.02 },
   "samples": [ { "tick": 923, "predictedPue": 1.074, "predictedWue": 0.213, "actualPue": 1.0768, "actualWue": 0.214, "chipTempC": 70.6, "feasible": true, "budgetOk": true, "meetsTarget": true } ]
 }
 ```
+
+`predicted*` is the shadow config's prediction, `actual*` the live config's. `meetsTarget` is one-sided: PUE ≤ target + 0.02 and WUE ≤ target + 0.02. `avgPueGap` averages only the amount above target. `ready` = shadow config set, ≥ `minSamples` samples, `feasibleRate` ≥ 0.95 and `meetsRate` ≥ 0.9.
 
 ---
 
@@ -262,6 +272,8 @@ Update facility budgets.
 **Request body** — `{ "totalWaterBudgetLpm": 4400, "totalPowerBudgetMw": 3.6 }`
 
 **Response** — `{ "ok": true }`
+
+- `400` non-positive values; `422` below the current Σ zone budgets
 
 ---
 
@@ -286,7 +298,7 @@ Per-zone control state + the 50 most recent control actions.
 
 ### `POST /api/control/mode`
 
-Set a zone's operating mode. Switching to `closed_loop` applies the validated shadow config (if any) as the starting setpoints.
+Set a zone's operating mode. Switching to `closed_loop` requires a shadow config whose validation is `ready`; the zone then moves toward the validated config through the slew limiter (first step applied immediately). Switching to `shadow` stops writeback and keeps the current setpoints.
 
 **Request body**
 
@@ -298,7 +310,7 @@ Set a zone's operating mode. Switching to `closed_loop` applies the validated sh
 
 **Response** — `ControlResponse` (fresh snapshot).
 
-- `400` missing/invalid `mode`; `404` zone not found.
+- `400` missing/invalid `mode`; `404` zone not found; `422` no shadow config or validation not passed.
 
 ### `POST /api/control/apply`
 
@@ -312,7 +324,7 @@ Write setpoints to a zone (slew-rate-limited, guardrail-checked).
 
 **Response** — `{ "ok": true, "applied": { /* Setpoints */ }, "slewLimited": false, "kind": "applied" }`
 
-`kind` is `"applied"` in closed-loop mode, `"would_be"` in shadow mode (logged, no writeback).
+`kind` is `"applied"` in closed-loop mode (setpoints written), `"would_be"` in shadow mode (logged only — the zone's setpoints are not changed).
 
 - `400` missing fields; `404` zone not found; `422` guardrail violation.
 
@@ -332,7 +344,7 @@ Apply setpoints to a zone's **shadow** config (validates guardrails + budget).
 
 ### `POST /api/control/heartbeat`
 
-Feed the watchdog for all zones. No body.
+Feed the watchdog for all zones. No body. (Every simulation tick also refreshes the heartbeat; if none arrives for 90 s the watchdog reverts zones to factory setpoints and disengages closed-loop.)
 
 **Response** — `{ "ok": true }`
 
@@ -378,12 +390,48 @@ List the 50 most recent transfers.
 
 Transition a transfer. `action` ∈ `virtual` | `verify` | `apply` | `reject`.
 
-- `apply` writes the transferred setpoints to both zones **and** reallocates their budgets (source loses `waterDeltaLpm`/`powerDeltaMw`, target gains the same).
-- Other actions only update the transfer's `status`.
+- `apply` re-checks guardrails against live telemetry, writes the transferred setpoints to both zones through the slew limiter, **and** reallocates their budgets (source loses `waterDeltaLpm`/`powerDeltaMw`, target gains the same).
+- Other actions only update the transfer's `status`. The stored status is the last action name (`shadow` → `virtual` → `verify` → `apply` | `reject`).
 
-**Response** — `{ "ok": true, "status": "<action>" }`
+**Response** — `{ "ok": true, "status": "<action>", "slewLimited": false }`
 
-- `404` transfer not found.
+- `404` transfer or zone not found; `409` transfer already applied or rejected; `422` guardrail violation on live telemetry.
+
+---
+
+## Sensors
+
+### `GET /api/sensors`
+
+Per-zone sensor readings with health, history and data-quality events. Query param: `window` (ticks, default `36` = 6 h, clamped 6–144).
+
+**Response** (`SensorsResponse`)
+
+```json
+{
+  "windowTicks": 36,
+  "zones": [
+    {
+      "zoneId": 4,
+      "name": "Zone D",
+      "ticks": [1001, 1002, "..."],
+      "sensors": [
+        {
+          "id": "4:cdu_supply",
+          "kind": "cdu_supply",
+          "value": 22.0,
+          "status": "warn",
+          "reason": "4 data-quality actions in the window",
+          "history": [21.9, 22.0, "..."],
+          "events": [ { "tick": 1030, "kind": "outlier", "note": "+6°C spike rejected; reading replaced by model estimate" } ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`kind` ∈ `gpu_die` | `cpu_die` | `cdu_supply` | `cdu_return` | `flow` | `delta_p` | `fws_supply` | `fws_flow` | `wet_bulb` | `dry_bulb`. `status` ∈ `ok` | `warn` | `crit` (rules in APPLICATION.md §4 Sensors). `history` aligns with `ticks`; `events` are newest first. Samples recorded before data-quality reports were stored have no events.
 
 ---
 
@@ -433,7 +481,7 @@ Self-check for the transfer engine (requires a valid session). Returns `200 { "o
 { "code": "CHIP_TEMP", "message": "T_chip 88.2°C > 85°C limit" }
 ```
 
-`code` ∈ `CHIP_TEMP` | `DELTA_P_LOW` | `DELTA_P_HIGH` | `FLOW_LOW` | `FLOW_HIGH`.
+`code` ∈ `CHIP_TEMP` | `DELTA_P_LOW` | `DELTA_P_HIGH` | `FLOW_LOW` | `FLOW_HIGH` | `THERMAL_MARGIN` (what-if operating reserve only).
 
 ### Telemetry
 

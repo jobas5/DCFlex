@@ -1,5 +1,5 @@
 import { evaluateGuardrails, flowFromSetpoints, predict } from "./surrogate";
-import type { GuardrailViolation, Prediction, Setpoints } from "./types";
+import { GUARDRAILS, type GuardrailViolation, type Prediction, type Setpoints } from "./types";
 
 export interface TransferContext {
   itLoadMw: number;
@@ -38,6 +38,14 @@ function pumpForFlow(targetFlow: number, setpoints: Setpoints): number {
     else hi = mid;
   }
   return (lo + hi) / 2;
+}
+
+// Whole-percent rounding can undershoot the bisected flow by a few L/min; never
+// let it take a zone under the guardrail floor the flow was clamped to.
+function roundPump(pump: number, setpoints: Setpoints): number {
+  const rounded = Math.round(clamp(pump, 40, 100));
+  const short = flowFromSetpoints({ ...setpoints, pumpSpeedPct: rounded }) < GUARDRAILS.flowMinLpm;
+  return short && rounded < 100 ? rounded + 1 : rounded;
 }
 
 function supplyForChiller(
@@ -113,13 +121,13 @@ export function proposeTransfer(
   const targetSetpoints: Setpoints = {
     ...target.setpoints,
     coolantSupplyC: targetSupply,
-    pumpSpeedPct: Math.round(clamp(targetPump, 40, 100)),
+    pumpSpeedPct: roundPump(targetPump, target.setpoints),
     cduSetpointC: Math.min(34, Math.round((targetSupply + 2) * 10) / 10),
   };
   const sourceSetpoints: Setpoints = {
     ...source.setpoints,
     coolantSupplyC: sourceSupply,
-    pumpSpeedPct: Math.round(clamp(sourcePump, 40, 100)),
+    pumpSpeedPct: roundPump(sourcePump, source.setpoints),
     cduSetpointC: Math.min(34, Math.round((sourceSupply + 2) * 10) / 10),
   };
 
