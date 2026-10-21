@@ -23,10 +23,13 @@ const fmtDateTimeOpts: Intl.DateTimeFormatOptions = {
   hour12: false,
 };
 
-export const fmtTime = (iso: string | Date) =>
-  new Intl.DateTimeFormat("en-GB", fmtTimeOpts).format(new Date(iso));
+// D1's CURRENT_TIMESTAMP is UTC without a zone ("YYYY-MM-DD HH:MM:SS"); browsers
+// would read that as local time, so mark it as UTC explicitly.
+const toDate = (v: string | Date) =>
+  v instanceof Date ? v : new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v) ? `${v.replace(" ", "T")}Z` : v);
 
-export const fmtDateTime = (iso: string | Date) =>
-  new Intl.DateTimeFormat("en-GB", fmtDateTimeOpts).format(new Date(iso));
+export const fmtTime = (iso: string | Date) => new Intl.DateTimeFormat("en-GB", fmtTimeOpts).format(toDate(iso));
+
+export const fmtDateTime = (iso: string | Date) => new Intl.DateTimeFormat("en-GB", fmtDateTimeOpts).format(toDate(iso));
 
 export const fmtTick = (tick: number) => fmtTime(tickToTime(tick));

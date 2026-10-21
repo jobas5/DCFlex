@@ -1,6 +1,7 @@
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { facilityRoute } from "./routes/facility";
 import { masterDataRoute } from "./routes/masterData";
 import { modelRoute } from "./routes/model";
 import { notFoundRoute } from "./routes/notFound";
@@ -14,6 +15,7 @@ import "./styles.css";
 
 const routeTree = rootRoute.addChildren([
   overviewRoute,
+  facilityRoute,
   optimizeRoute,
   optimizeDetailRoute,
   shadowRoute,

@@ -1,34 +1,92 @@
 @import "tailwindcss";
 
-@theme {
-  --color-sev-ok: #34d399;
-  --color-sev-warn: #fbbf24;
-  --color-sev-crit: #f87171;
-  --color-sev-info: #22d3ee;
-  --color-chart-1: #22d3ee;
-  --color-chart-2: #34d399;
-  --color-chart-3: #fbbf24;
-  --color-chart-4: #f472b6;
-  --color-chart-5: #a78bfa;
-  --color-chart-6: #94a3b8;
+@custom-variant light (&:where([data-theme="light"], [data-theme="light"] *));
+
+/* Semantic tokens. Components only use these names, so both themes come from
+   the variable blocks below. */
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-fg-faint: var(--fg-faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-crit: var(--crit);
+  --color-info: var(--info);
+  --color-violet: var(--violet);
+  --color-pink: var(--pink);
+
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+
+  --shadow-card: var(--card-shadow);
+  --shadow-pop: var(--pop-shadow);
 }
 
-:root {
-  --font-body:
-    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-display: var(--font-body);
-  --font-mono:
-    ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", monospace;
-
-  font-family: var(--font-body);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #07090c;
+  --surface: #0c1016;
+  --surface-2: #121820;
+  --surface-3: #1a222c;
+  --line: rgb(148 163 184 / 0.11);
+  --line-strong: rgb(148 163 184 / 0.22);
+  --fg: #e7edf4;
+  --fg-muted: #a4b0be;
+  --fg-subtle: #7c8896;
+  --fg-faint: #586370;
+  --accent: #22d3ee;
+  --accent-strong: #06b6d4;
+  --on-accent: #03141a;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --crit: #fb7185;
+  --info: #38bdf8;
+  --violet: #a78bfa;
+  --pink: #f472b6;
+  --chart-grid: rgb(148 163 184 / 0.1);
+  --chart-axis: #586370;
+  --card-shadow: inset 0 1px 0 0 rgb(255 255 255 / 0.035), 0 1px 2px 0 rgb(0 0 0 / 0.35);
+  --pop-shadow: 0 0 0 1px rgb(148 163 184 / 0.14), 0 16px 40px -8px rgb(0 0 0 / 0.6);
+  --glow: rgb(34 211 238 / 0.07);
 }
 
-* {
-  box-sizing: border-box;
+[data-theme="light"] {
+  color-scheme: light;
+  --canvas: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #f2f5f8;
+  --surface-3: #e7ecf2;
+  --line: rgb(15 23 42 / 0.08);
+  --line-strong: rgb(15 23 42 / 0.15);
+  --fg: #0b1220;
+  --fg-muted: #475467;
+  --fg-subtle: #667085;
+  --fg-faint: #98a2b3;
+  --accent: #0891b2;
+  --accent-strong: #0e7490;
+  --on-accent: #ffffff;
+  --ok: #059669;
+  --warn: #d97706;
+  --crit: #e11d48;
+  --info: #0284c7;
+  --violet: #7c3aed;
+  --pink: #db2777;
+  --chart-grid: rgb(15 23 42 / 0.07);
+  --chart-axis: #98a2b3;
+  --card-shadow: 0 1px 2px 0 rgb(15 23 42 / 0.05), 0 1px 3px 0 rgb(15 23 42 / 0.04);
+  --pop-shadow: 0 0 0 1px rgb(15 23 42 / 0.08), 0 16px 40px -12px rgb(15 23 42 / 0.25);
+  --glow: rgb(8 145 178 / 0.06);
 }
 
 html,
@@ -39,19 +97,110 @@ body,
   margin: 0;
 }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
+body {
+  background-color: var(--canvas);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-:where(h1, h2, h3, h4) {
-  font-family: var(--font-display);
+::selection {
+  background: color-mix(in oklab, var(--accent) 30%, transparent);
 }
 
-:where(code, kbd, pre, samp) {
-  font-family: var(--font-mono);
+/* ---------- Range slider ------------------------------------------------ */
+
+.range {
+  --fill: 50%;
+  --range-color: var(--accent);
+  appearance: none;
+  width: 100%;
+  height: 20px;
+  background: transparent;
+  cursor: pointer;
+}
+.range:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.range:focus-visible {
+  outline: none;
+}
+.range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--range-color) var(--fill), var(--surface-3) var(--fill));
+}
+.range::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 999px;
+  background: #fff;
+  border: 3px solid var(--range-color);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+  transition: transform 120ms ease;
+}
+.range:active::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+.range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--range-color) 35%, transparent);
+}
+.range::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+.range::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--range-color);
+}
+.range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #fff;
+  border: 3px solid var(--range-color);
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.35);
+}
+
+/* ---------- Scrollbars --------------------------------------------------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-3) transparent;
+}
+
+/* ---------- Motion ------------------------------------------------------- */
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes live-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
 }
 
 @keyframes led-blink {
@@ -88,5 +237,19 @@ select {
   100% {
     transform: translateX(26px);
     opacity: 0;
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 260ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
   }
 }

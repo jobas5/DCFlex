@@ -1,6 +1,30 @@
-import { useState, type FormEvent } from "react";
-import { Snowflake } from "lucide-react";
+import { Activity, Droplets, ShieldCheck, Zap } from "lucide-react";
+import { useState, type FormEvent, type InputHTMLAttributes } from "react";
+import { LogoMark } from "../components/Topbar";
+import { Button, cx } from "../components/ui";
 import { useAuth } from "../lib/auth";
+
+const FEATURES = [
+  { icon: Zap, title: "PUE & WUE in balance", body: "Grid-search 1,560 setpoint permutations against a weighted objective." },
+  { icon: ShieldCheck, title: "Safe by construction", body: "Hard guardrails, slew limits and a watchdog on every write." },
+  { icon: Activity, title: "Shadow before closed-loop", body: "Validate recommendations on live telemetry first." },
+  { icon: Droplets, title: "Cooling transfer", body: "Move water and chiller power to the zones that need it." },
+];
+
+function Input({ label, className = "", ...rest }: InputHTMLAttributes<HTMLInputElement> & { label: string }) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-fg-muted">{label}</span>
+      <input
+        {...rest}
+        className={cx(
+          "mt-1.5 h-10 w-full rounded-lg bg-surface-2 px-3 text-sm text-fg ring-1 ring-inset ring-line-strong placeholder:text-fg-faint focus:outline-none focus:ring-2 focus:ring-accent",
+          className,
+        )}
+      />
+    </label>
+  );
+}
 
 export function Login() {
   const { login } = useAuth();
@@ -23,62 +47,97 @@ export function Login() {
   };
 
   return (
-    <div className="relative flex min-h-dvh items-center justify-center bg-slate-950 px-4 text-slate-100">
-      <div
-        className="pointer-events-none absolute inset-0"
-        aria-hidden
-        style={{ background: "radial-gradient(60rem 40rem at 50% -10%, rgba(34,211,238,0.08), transparent)" }}
-      />
-      <div className="relative w-full max-w-sm rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/80 to-slate-900/40 p-6 shadow-sm">
-        <div className="flex items-center gap-2.5">
-          <Snowflake className="h-6 w-6 text-cyan-400" aria-hidden />
-          <div>
-            <p className="text-sm font-semibold leading-tight">DCFlex</p>
-            <p className="text-xs text-slate-400">Cooling Optimizer · Digital Twin</p>
+    <div className="grid min-h-dvh lg:grid-cols-[1.1fr_1fr]">
+      {/* Brand panel */}
+      <div className="relative hidden overflow-hidden border-r border-line bg-surface lg:flex lg:flex-col lg:justify-between lg:p-12">
+        <div
+          className="pointer-events-none absolute inset-0"
+          aria-hidden
+          style={{
+            background:
+              "radial-gradient(40rem 28rem at 0% 0%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 70%), radial-gradient(36rem 26rem at 100% 100%, color-mix(in oklab, var(--ok) 12%, transparent), transparent 70%)",
+          }}
+        />
+        <div
+          className="pointer-events-none absolute inset-0 opacity-[0.35]"
+          aria-hidden
+          style={{
+            backgroundImage: "radial-gradient(var(--line-strong) 1px, transparent 1px)",
+            backgroundSize: "22px 22px",
+            maskImage: "linear-gradient(to bottom, black, transparent 85%)",
+          }}
+        />
+        <div className="relative flex items-center gap-3">
+          <LogoMark className="h-9 w-9" />
+          <div className="leading-tight">
+            <p className="font-semibold tracking-tight text-fg">DCFlex</p>
+            <p className="text-xs text-fg-subtle">Cooling digital twin</p>
           </div>
         </div>
+        <div className="relative max-w-lg">
+          <h2 className="text-4xl font-semibold leading-[1.1] tracking-tight text-fg">
+            Keep chips cool.
+            <br />
+            <span className="bg-gradient-to-r from-accent to-ok bg-clip-text text-transparent">Spend less energy and water.</span>
+          </h2>
+          <p className="mt-4 text-sm leading-relaxed text-fg-subtle">
+            A physics-guided digital twin for high-density liquid-cooled data centers. Simulate, verify, and safely apply
+            cooling decisions.
+          </p>
+          <ul className="mt-8 grid grid-cols-2 gap-4">
+            {FEATURES.map((f) => (
+              <li key={f.title} className="rounded-xl border border-line bg-surface-2/60 p-4 backdrop-blur">
+                <f.icon className="h-4 w-4 text-accent" aria-hidden />
+                <p className="mt-2 text-sm font-medium text-fg">{f.title}</p>
+                <p className="mt-1 text-xs leading-relaxed text-fg-subtle">{f.body}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <p className="relative text-xs text-fg-faint">All telemetry is simulated by a seeded, deterministic generator.</p>
+      </div>
 
-        <h1 className="mt-6 text-xl font-semibold">Sign in</h1>
-        <p className="mt-1 text-sm text-slate-400">Enter your operator credentials to continue.</p>
+      {/* Form */}
+      <div className="flex items-center justify-center px-4 py-12">
+        <div className="w-full max-w-sm">
+          <div className="flex items-center gap-3 lg:hidden">
+            <LogoMark className="h-9 w-9" />
+            <div className="leading-tight">
+              <p className="font-semibold tracking-tight text-fg">DCFlex</p>
+              <p className="text-xs text-fg-subtle">Cooling digital twin</p>
+            </div>
+          </div>
+          <h1 className="mt-8 text-2xl font-semibold tracking-tight text-fg lg:mt-0">Sign in</h1>
+          <p className="mt-1.5 text-sm text-fg-subtle">Enter your operator credentials to continue.</p>
 
-        <form onSubmit={submit} className="mt-4 space-y-3">
-          <label className="block text-xs">
-            <span className="text-slate-400">Username</span>
-            <input
+          <form onSubmit={submit} className="mt-8 space-y-4">
+            <Input
+              label="Username"
               type="text"
               autoComplete="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               required
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-cyan-400"
             />
-          </label>
-          <label className="block text-xs">
-            <span className="text-slate-400">Password</span>
-            <input
+            <Input
+              label="Password"
               type="password"
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-cyan-400"
             />
-          </label>
-
-          {error ? (
-            <p className="rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-300" role="alert">
-              {error}
-            </p>
-          ) : null}
-
-          <button
-            type="submit"
-            disabled={busy}
-            className="w-full rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 disabled:opacity-50"
-          >
-            {busy ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
+            {error ? (
+              <p className="rounded-lg bg-crit/10 px-3 py-2 text-xs text-crit ring-1 ring-inset ring-crit/25" role="alert">
+                {error}
+              </p>
+            ) : null}
+            <Button type="submit" variant="primary" size="lg" disabled={busy} className="w-full">
+              {busy ? "Signing in…" : "Sign in"}
+            </Button>
+          </form>
+          <p className="mt-8 text-center text-xs text-fg-faint">Sessions last 12 hours. Access is single-account.</p>
+        </div>
       </div>
     </div>
   );

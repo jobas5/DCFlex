@@ -1,14 +1,35 @@
-import { createRoute } from "@tanstack/react-router";
-import { ArrowRight, BrainCircuit, CheckCircle2, FileBox, Scale, Timer } from "lucide-react";
-import { Fragment, useCallback, useEffect, useState } from "react";
-import { ErrorState } from "../components/ui";
+import { createRoute, Link } from "@tanstack/react-router";
+import {
+  Activity,
+  ArrowRight,
+  BrainCircuit,
+  CheckCircle2,
+  FileBox,
+  Gauge,
+  LineChart as LineChartIcon,
+  Scale,
+  ShieldAlert,
+  ShieldCheck,
+  Timer,
+  TriangleAlert,
+  Workflow,
+} from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { LineChart } from "../components/LineChart";
+import { Badge, buttonStyles, Card, cx, ErrorState, IconChip, PageHeader, Skeleton, TONE_TEXT, type Tone } from "../components/ui";
 import { api, type ModelMetricsResponse } from "../lib/api";
 import { fmtDateTime } from "../lib/time";
+import { CHART } from "../lib/tokens";
+import { modelInsights } from "../lib/twin/modelInsights";
+import { monotonicityCurve } from "../lib/twin/modelMeta";
+import { FACTORY_SETPOINTS } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
 /* ------------------------------------------------------------------ */
-/* Five-stage pipeline visualizations (pure SVG, no controls)           */
+/* Pipeline visuals (pure SVG, themed through CSS variables)            */
 /* ------------------------------------------------------------------ */
+
+const BOX = { fill: "var(--surface-2)", stroke: "var(--line-strong)" };
 
 function ServerRacks() {
   const racks = [5, 35, 65, 95];
@@ -16,13 +37,24 @@ function ServerRacks() {
     <svg viewBox="0 0 120 48" className="h-12 w-full" role="img" aria-label="Server racks emitting telemetry">
       {racks.map((x, i) => (
         <g key={x}>
-          <rect x={x} y={6} width={22} height={36} rx={2} fill="#0f172a" stroke="#334155" />
-          <line x1={x + 4} y1={13} x2={x + 18} y2={13} stroke="#334155" />
-          <line x1={x + 4} y1={35} x2={x + 18} y2={35} stroke="#334155" />
-          <circle cx={x + 8} cy={17} r={1.6} fill="#22d3ee" style={{ animation: `led-blink 2s ease-in-out ${i * 0.4}s infinite` }} />
-          <circle cx={x + 14} cy={17} r={1.6} fill="#34d399" style={{ animation: `led-blink 2s ease-in-out ${i * 0.4 + 0.3}s infinite` }} />
-          <circle cx={x + 8} cy={30} r={1.6} fill="#22d3ee" style={{ animation: `led-blink 2s ease-in-out ${i * 0.4 + 0.15}s infinite` }} />
-          <circle cx={x + 14} cy={30} r={1.6} fill="#34d399" style={{ animation: `led-blink 2s ease-in-out ${i * 0.4 + 0.5}s infinite` }} />
+          <rect x={x} y={6} width={22} height={36} rx={3} {...BOX} />
+          <line x1={x + 4} y1={13} x2={x + 18} y2={13} stroke="var(--line-strong)" />
+          <line x1={x + 4} y1={35} x2={x + 18} y2={35} stroke="var(--line-strong)" />
+          {[
+            [8, 17, 0, "var(--accent)"],
+            [14, 17, 0.3, "var(--ok)"],
+            [8, 30, 0.15, "var(--accent)"],
+            [14, 30, 0.5, "var(--ok)"],
+          ].map(([dx, cy, delay, c], j) => (
+            <circle
+              key={j}
+              cx={x + Number(dx)}
+              cy={Number(cy)}
+              r={1.6}
+              fill={String(c)}
+              style={{ animation: `led-blink 2s ease-in-out ${i * 0.4 + Number(delay)}s infinite` }}
+            />
+          ))}
         </g>
       ))}
     </svg>
@@ -39,13 +71,13 @@ function ScatterPlot() {
   ];
   return (
     <svg viewBox="0 0 120 48" className="h-12 w-full" role="img" aria-label="Scatter plot of raw telemetry with outliers and gaps">
-      <rect x={4} y={2} width={112} height={44} rx={3} fill="#0f172a" stroke="#1e293b" />
-      <rect x={48} y={4} width={16} height={40} fill="none" stroke="#334155" strokeDasharray="2 3" />
+      <rect x={4} y={2} width={112} height={44} rx={4} {...BOX} />
+      <rect x={48} y={4} width={16} height={40} fill="none" stroke="var(--line-strong)" strokeDasharray="2 3" />
       {normal.map(([x, y], i) => (
-        <circle key={i} cx={x} cy={y} r={2} fill="#60a5fa" />
+        <circle key={i} cx={x} cy={y} r={2} fill="var(--info)" />
       ))}
       {anomaly.map(([x, y], i) => (
-        <circle key={i} cx={x} cy={y} r={2.4} fill="#f87171" style={{ animation: `node-pulse 1.6s ease-in-out ${i * 0.5}s infinite` }} />
+        <circle key={i} cx={x} cy={y} r={2.4} fill="var(--crit)" style={{ animation: `node-pulse 1.6s ease-in-out ${i * 0.5}s infinite` }} />
       ))}
     </svg>
   );
@@ -58,36 +90,30 @@ function NeuralNet() {
   return (
     <svg viewBox="0 0 120 48" className="h-12 w-full" role="img" aria-label="Neural network with data pulses flowing through connections">
       {inputs.map((y) =>
-        hidden.map((hy) => (
-          <line key={`i${y}-${hy}`} x1={14} y1={y} x2={58} y2={hy} stroke="#1e3a5f" strokeWidth="0.6" />
-        )),
+        hidden.map((hy) => <line key={`i${y}-${hy}`} x1={14} y1={y} x2={58} y2={hy} stroke="var(--line-strong)" strokeWidth="0.6" />),
       )}
       {hidden.map((y) =>
-        outputs.map((oy) => (
-          <line key={`o${y}-${oy}`} x1={58} y1={y} x2={104} y2={oy} stroke="#1e3a5f" strokeWidth="0.6" />
-        )),
+        outputs.map((oy) => <line key={`o${y}-${oy}`} x1={58} y1={y} x2={104} y2={oy} stroke="var(--line-strong)" strokeWidth="0.6" />),
       )}
       {inputs.map((y, i) => (
-        <circle key={`in${i}`} cx={14} cy={y} r={3} fill="#22d3ee" style={{ animation: `node-pulse 2s ease-in-out ${i * 0.3}s infinite` }} />
+        <circle key={`in${i}`} cx={14} cy={y} r={3} fill="var(--accent)" style={{ animation: `node-pulse 2s ease-in-out ${i * 0.3}s infinite` }} />
       ))}
       {hidden.map((y, i) => (
-        <circle key={`h${i}`} cx={58} cy={y} r={3} fill="#38bdf8" style={{ animation: `node-pulse 2s ease-in-out ${i * 0.2}s infinite` }} />
+        <circle key={`h${i}`} cx={58} cy={y} r={3} fill="var(--info)" style={{ animation: `node-pulse 2s ease-in-out ${i * 0.2}s infinite` }} />
       ))}
       {outputs.map((y, i) => (
-        <circle key={`out${i}`} cx={104} cy={y} r={3} fill="#34d399" style={{ animation: `node-pulse 2s ease-in-out ${i * 0.4}s infinite` }} />
+        <circle key={`out${i}`} cx={104} cy={y} r={3} fill="var(--ok)" style={{ animation: `node-pulse 2s ease-in-out ${i * 0.4}s infinite` }} />
       ))}
     </svg>
   );
 }
 
 function VerifyChart() {
-  const pred = "M6,32 L18,30 L30,28 L42,27 L54,25 L66,24 L78,23 L90,22 L102,21 L114,20";
-  const obs = "M6,34 L18,31 L30,30 L42,29 L54,26 L66,25 L78,24 L90,24 L102,22 L114,21";
   return (
     <svg viewBox="0 0 120 48" className="h-12 w-full" role="img" aria-label="Model prediction line versus observed measurement">
-      <rect x={4} y={2} width={112} height={44} rx={3} fill="#0f172a" stroke="#1e293b" />
-      <path d={obs} fill="none" stroke="#94a3b8" strokeWidth="1.2" strokeDasharray="4 3" />
-      <path d={pred} fill="none" stroke="#34d399" strokeWidth="1.6" />
+      <rect x={4} y={2} width={112} height={44} rx={4} {...BOX} />
+      <path d="M6,34 L18,31 L30,30 L42,29 L54,26 L66,25 L78,24 L90,24 L102,22 L114,21" fill="none" stroke="var(--fg-subtle)" strokeWidth="1.2" strokeDasharray="4 3" />
+      <path d="M6,32 L18,30 L30,28 L42,27 L54,25 L66,24 L78,23 L90,22 L102,21 L114,20" fill="none" stroke="var(--ok)" strokeWidth="1.6" />
     </svg>
   );
 }
@@ -95,130 +121,70 @@ function VerifyChart() {
 function MiniDashboard() {
   return (
     <svg viewBox="0 0 120 48" className="h-12 w-full" role="img" aria-label="Miniature dashboard receiving verified predictions">
-      <rect x={4} y={2} width={112} height={44} rx={3} fill="#0f172a" stroke="#1e293b" />
-      <path d="M8,38 L22,32 L34,34 L46,26 L58,28 L70,18 L82,20 L96,10 L112,12" fill="none" stroke="#22d3ee" strokeWidth="1.5" />
-      <rect x={20} y={8} width={10} height={10} rx={1} fill="none" stroke="#334155" />
-      <rect x={34} y={8} width={10} height={10} rx={1} fill="none" stroke="#334155" />
-      <rect x={48} y={8} width={10} height={10} rx={1} fill="#0f172a" stroke="#34d399" />
-      <circle cx={100} cy={10} r={5} fill="none" stroke="#34d399" strokeWidth="1.5" />
-      <path d="M100,7 A5,5 0 0 1 104,13 L100,10 Z" fill="#34d399" />
+      <rect x={4} y={2} width={112} height={44} rx={4} {...BOX} />
+      <path d="M8,38 L22,32 L34,34 L46,26 L58,28 L70,18 L82,20 L96,10 L112,12" fill="none" stroke="var(--accent)" strokeWidth="1.5" />
+      <rect x={20} y={8} width={10} height={10} rx={1.5} fill="none" stroke="var(--line-strong)" />
+      <rect x={34} y={8} width={10} height={10} rx={1.5} fill="none" stroke="var(--line-strong)" />
+      <rect x={48} y={8} width={10} height={10} rx={1.5} fill="none" stroke="var(--ok)" />
+      <circle cx={100} cy={10} r={5} fill="none" stroke="var(--ok)" strokeWidth="1.5" />
+      <path d="M100,7 A5,5 0 0 1 104,13 L100,10 Z" fill="var(--ok)" />
     </svg>
   );
 }
 
 const STAGES = [
-  {
-    n: 1,
-    title: "Data Collection",
-    subtitle: "From real hardware",
-    desc: "Collect operational data from IT load, cooling systems, sensors, and environment.",
-    visual: <ServerRacks />,
-  },
-  {
-    n: 2,
-    title: "Raw Data",
-    subtitle: "May contain noise",
-    desc: "Real-world data can include anomalies, outliers, or missing values due to sensor noise, connection loss, or rare events.",
-    visual: <ScatterPlot />,
-  },
-  {
-    n: 3,
-    title: "Surrogate Model",
-    subtitle: "Learn & clean",
-    desc: "The surrogate model learns system patterns, detects anomalies, and reconstructs clean, consistent data.",
-    visual: <NeuralNet />,
-  },
-  {
-    n: 4,
-    title: "Verification",
-    subtitle: "Validate accuracy",
-    desc: "Model predictions are compared with real measurements to verify accuracy and reliability within defined tolerances.",
-    visual: <VerifyChart />,
-  },
-  {
-    n: 5,
-    title: "DCFlex System",
-    subtitle: "Trusted predictions",
-    desc: "Verified predictions are delivered to DCFlex for optimization, what-if scenarios, and decision support.",
-    visual: <MiniDashboard />,
-  },
+  { title: "Data collection", subtitle: "From hardware", desc: "IT load, cooling systems, sensors and environment.", visual: <ServerRacks /> },
+  { title: "Raw data", subtitle: "May contain noise", desc: "Outliers, drift and gaps from sensor noise or connection loss.", visual: <ScatterPlot /> },
+  { title: "Surrogate model", subtitle: "Learn & clean", desc: "Learns system patterns, detects anomalies, reconstructs clean data.", visual: <NeuralNet /> },
+  { title: "Verification", subtitle: "Validate accuracy", desc: "Predictions are compared with measurements within tolerances.", visual: <VerifyChart /> },
+  { title: "DCFlex", subtitle: "Trusted predictions", desc: "Feeds optimisation, what-if scenarios and decision support.", visual: <MiniDashboard /> },
 ] as const;
 
-function FlowArrow() {
-  return (
-    <div className="hidden shrink-0 items-center gap-0.5 self-center lg:flex" aria-hidden>
-      <div className="relative h-px w-9 overflow-visible bg-slate-600">
-        <span
-          className="absolute -top-[3px] h-1.5 w-1.5 rounded-full bg-cyan-400"
-          style={{ animation: "particle-flow 1.8s ease-in-out infinite" }}
-        />
-        <span
-          className="absolute -top-[3px] h-1.5 w-1.5 rounded-full bg-cyan-400"
-          style={{ animation: "particle-flow 1.8s ease-in-out 0.9s infinite" }}
-        />
-      </div>
-      <ArrowRight className="h-3 w-3 text-slate-500" />
-    </div>
-  );
-}
-
 /* ------------------------------------------------------------------ */
-/* Model profile                                                       */
+/* Pieces                                                              */
 /* ------------------------------------------------------------------ */
 
-function ProfileRow({ icon: Icon, label, value }: { icon: typeof BrainCircuit; label: string; value: string }) {
-  return (
-    <div className="flex items-start gap-3 py-2">
-      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-cyan-400" aria-hidden />
-      <div>
-        <dt className="text-xs uppercase tracking-wider text-slate-500">{label}</dt>
-        <dd className="text-sm text-slate-200">{value}</dd>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Model performance                                                   */
-/* ------------------------------------------------------------------ */
-
-function PerfCard({
-  icon: Icon,
-  accent,
+function MetricCard({
+  icon,
   label,
   value,
-  status,
+  tone,
+  verdict,
   target,
   explain,
-  note,
 }: {
   icon: typeof Scale;
-  accent: string;
   label: string;
   value: string;
-  status: string;
+  tone: Tone;
+  verdict: string;
   target: string;
   explain: string;
-  note?: string;
 }) {
   return (
-    <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">
+    <div className="flex flex-col rounded-2xl border border-line bg-surface p-4 shadow-card">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-medium uppercase tracking-wider text-slate-400">{label}</p>
-        <Icon className="h-4 w-4 shrink-0" style={{ color: accent }} aria-hidden />
+        <p className="text-xs font-medium text-fg-subtle">{label}</p>
+        <IconChip icon={icon} tone={tone} size="sm" />
       </div>
-      <p className="mt-2 font-mono text-2xl font-semibold tabular-nums text-slate-100">{value}</p>
-      <p className="mt-1 flex items-center gap-1.5 text-xs">
-        <span className="inline-flex items-center gap-1 text-emerald-300">
-          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden /> {status}
+      <p className="mt-2 text-[1.65rem] font-semibold leading-none tracking-tight tabular-nums text-fg">{value}</p>
+      <p className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+        <span className={cx("inline-flex items-center gap-1 font-medium", TONE_TEXT[tone])}>
+          {tone === "ok" ? <CheckCircle2 className="h-3.5 w-3.5" aria-hidden /> : <TriangleAlert className="h-3.5 w-3.5" aria-hidden />}
+          {verdict}
         </span>
-        <span className="text-slate-400">· {target}</span>
+        <span className="text-fg-faint">· {target}</span>
       </p>
-      <p className="mt-2 text-xs leading-relaxed text-slate-400">{explain}</p>
-      {note ? <p className="mt-1 text-xs text-slate-500">{note}</p> : null}
+      <p className="mt-3 text-xs leading-relaxed text-fg-subtle">{explain}</p>
     </div>
   );
 }
+
+const HEALTH = {
+  good: { tone: "ok" as Tone, label: "Healthy", icon: ShieldCheck },
+  watch: { tone: "warn" as Tone, label: "Watch", icon: Activity },
+  retrain: { tone: "crit" as Tone, label: "Retrain", icon: ShieldAlert },
+};
 
 /* ------------------------------------------------------------------ */
 /* Page                                                                */
@@ -241,164 +207,211 @@ function ModelPage() {
     void load();
   }, [load]);
 
-  if (error) return <ErrorState message={error} onRetry={() => void load()} />;
-  if (!data) return <p className="py-20 text-center text-sm text-slate-400">Loading model card…</p>;
+  const curves = useMemo(() => [12, 20, 28].map((wb) => ({ wb, points: monotonicityCurve(FACTORY_SETPOINTS, wb) })), []);
 
-  const { latest, card } = data;
+  if (error) return <ErrorState message={error} onRetry={() => void load()} />;
+  if (!data) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-14 w-80" />
+        <Skeleton className="h-28" />
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, i) => (
+            <Skeleton key={i} className="h-40" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const { latest, card, drift } = data;
   const [serving, runtime] = card.exportedFormat.split(" — ");
+  const health = modelInsights({ latest, card });
+  const h = HEALTH[health.status];
+
+  const maeOk = latest.maeMw <= card.targets.maeMw;
+  const covOk = latest.pueCoverage >= card.targets.pueCoveragePct;
+  const latOk = latest.inferenceLatencyMs < 10;
+  const klTone: Tone =
+    latest.klDivergence >= card.drift.criticalThreshold ? "crit" : latest.klDivergence >= card.drift.warnThreshold ? "warn" : "ok";
 
   return (
-    <div className="space-y-4">
-      {/* Page header */}
-      <div>
-        <h1 className="text-xl font-semibold">Surrogate Model</h1>
-        <p className="text-sm text-slate-400">
-          A physics-guided machine learning model that learns from real system data, filters out anomalies, and delivers
-          clean, reliable predictions to power DCFlex.
-        </p>
-        <p className="mt-1 text-xs text-slate-500">The model runs behind the scenes — this page explains how it works.</p>
+    <div className="animate-fade-up space-y-8">
+      <PageHeader
+        title="Surrogate model"
+        description="A physics-guided, monotonicity-constrained model that turns setpoints and conditions into PUE, WUE and chip-temperature predictions."
+        actions={<Badge tone="accent">{`${card.name} v${card.version}`}</Badge>}
+      />
+
+      <section
+        className={cx(
+          "relative overflow-hidden rounded-2xl border bg-surface p-5 shadow-card",
+          h.tone === "ok" ? "border-ok/30" : h.tone === "warn" ? "border-warn/40" : "border-crit/40",
+        )}
+      >
+        <div
+          className="pointer-events-none absolute inset-0"
+          aria-hidden
+          style={{ background: `radial-gradient(32rem 10rem at 0% 0%, color-mix(in oklab, var(--${h.tone}) 10%, transparent), transparent 70%)` }}
+        />
+        <div className="relative flex flex-wrap items-center gap-4">
+          <IconChip icon={h.icon} tone={h.tone} />
+          <div className="min-w-0 flex-1">
+            <p className="flex items-center gap-2 text-sm font-semibold text-fg">
+              Model health <Badge tone={h.tone} dot>{h.label}</Badge>
+            </p>
+            <p className="mt-1 text-sm text-fg-muted">{health.summary}</p>
+            <p className="mt-0.5 text-xs text-fg-subtle">{health.recommendation}</p>
+          </div>
+          {health.action ? (
+            <Link to={health.action.to} className={buttonStyles("secondary", "sm")}>
+              {health.action.label} <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+            </Link>
+          ) : null}
+        </div>
+      </section>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard
+          icon={Scale}
+          label="MAE · accessory power"
+          value={`${latest.maeMw.toFixed(3)} MW`}
+          tone={maeOk ? "ok" : "warn"}
+          verdict={maeOk ? "Meets target" : "Above target"}
+          target={`≤ ${card.targets.maeMw.toFixed(3)} MW`}
+          explain="Average absolute error between predicted and measured accessory power."
+        />
+        <MetricCard
+          icon={CheckCircle2}
+          label={`PUE ±${card.targets.pueErrorBound} coverage`}
+          value={`${latest.pueCoverage.toFixed(1)}%`}
+          tone={covOk ? "ok" : "warn"}
+          verdict={covOk ? "Meets target" : "Below target"}
+          target={`≥ ${card.targets.pueCoveragePct.toFixed(1)}%`}
+          explain={`Share of predictions whose PUE error stays within ±${card.targets.pueErrorBound}.`}
+        />
+        <MetricCard
+          icon={Timer}
+          label="Inference latency"
+          value={`${latest.inferenceLatencyMs.toFixed(1)} ms`}
+          tone={latOk ? "ok" : "warn"}
+          verdict={latOk ? "Meets target" : "Too slow"}
+          target="p50 < 10 ms"
+          explain="Median time per prediction — fast enough to score thousands of what-if scenarios live."
+        />
+        <MetricCard
+          icon={Gauge}
+          label="Drift · KL divergence"
+          value={latest.klDivergence.toFixed(3)}
+          tone={klTone}
+          verdict={klTone === "ok" ? "Within bounds" : klTone === "warn" ? "Drifting" : "Retrain"}
+          target={`warn ≥ ${card.drift.warnThreshold.toFixed(2)}`}
+          explain="How far the live feature distribution has shifted from the training baseline."
+        />
       </div>
 
-      {/* Five-stage pipeline */}
-      <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">How Surrogate Model Works</h2>
-        <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-stretch lg:gap-2">
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card title="Feature drift" description="KL divergence vs training baseline, hourly" icon={LineChartIcon}>
+          <LineChart
+            height={220}
+            ariaLabel="KL divergence drift over the last 48 hours"
+            labels={drift.map((d) => fmtDateTime(d.t).replace(/:\d{2}$/, ""))}
+            series={[{ label: "KL", color: CHART.cyan, values: drift.map((d) => d.kl), area: true }]}
+            thresholds={[
+              { value: card.drift.warnThreshold, label: `warn ${card.drift.warnThreshold}`, color: "var(--warn)" },
+              { value: card.drift.criticalThreshold, label: `retrain ${card.drift.criticalThreshold}`, color: "var(--crit)" },
+            ]}
+            include={[0]}
+            yFormat={(v) => v.toFixed(2)}
+          />
+        </Card>
+        <Card title="Monotonicity check" description="Accessory power vs IT load at factory setpoints" icon={BrainCircuit}>
+          <LineChart
+            height={220}
+            ariaLabel="Accessory power rises monotonically with IT load and wet-bulb"
+            labels={curves[0].points.map((p) => `${p.itLoadMw} MW`)}
+            series={curves.map((c, i) => ({
+              label: `Wet-bulb ${c.wb}°C`,
+              color: [CHART.cyan, CHART.amber, CHART.rose][i],
+              values: c.points.map((p) => p.accessoryPowerMw),
+            }))}
+            yFormat={(v) => `${v.toFixed(2)} MW`}
+          />
+        </Card>
+      </div>
+
+      <Card title="How the model works" description="From raw hardware telemetry to trusted predictions" icon={Workflow}>
+        <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:flex xl:items-stretch xl:gap-0">
           {STAGES.map((s, i) => (
             <Fragment key={s.title}>
-              {i > 0 ? <FlowArrow /> : null}
-              <div className="group flex flex-1 flex-col rounded-xl border border-slate-700/60 bg-slate-900/50 p-4 transition-colors hover:border-cyan-400/60 hover:bg-slate-900/70">
+              {i > 0 ? (
+                <li className="hidden shrink-0 items-center px-1.5 xl:flex" aria-hidden>
+                  <div className="relative h-px w-6 bg-line-strong">
+                    <span className="absolute -top-[3px] h-1.5 w-1.5 rounded-full bg-accent" style={{ animation: "particle-flow 1.8s ease-in-out infinite" }} />
+                  </div>
+                </li>
+              ) : null}
+              <li className="group flex flex-1 flex-col rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line transition-colors hover:ring-accent/40">
                 <div className="flex items-center gap-2">
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 text-[11px] font-semibold text-cyan-300">
-                    {s.n}
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">
+                    {i + 1}
                   </span>
-                  <div>
-                    <p className="text-sm font-semibold text-slate-200">{s.title}</p>
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500">{s.subtitle}</p>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-fg">{s.title}</p>
+                    <p className="text-[11px] text-fg-faint">{s.subtitle}</p>
                   </div>
                 </div>
                 <div className="mt-3">{s.visual}</div>
-                <p className="mt-3 text-xs leading-relaxed text-slate-400 transition-colors group-hover:text-slate-300">{s.desc}</p>
-              </div>
+                <p className="mt-3 text-xs leading-relaxed text-fg-subtle">{s.desc}</p>
+              </li>
             </Fragment>
           ))}
-        </div>
-      </div>
+        </ol>
+      </Card>
 
-      {/* Model profile */}
-      <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Model Profile</h2>
-        <dl className="mt-2 divide-y divide-slate-800">
-          <ProfileRow icon={BrainCircuit} label="Model" value="Monotonicity-Constrained Surrogate Model" />
-          <ProfileRow icon={BrainCircuit} label="Algorithm" value={card.algorithm} />
-          <ProfileRow icon={FileBox} label="Serving" value={serving} />
-          <ProfileRow icon={FileBox} label="Runtime" value={runtime} />
-          <ProfileRow icon={Scale} label="Training Data" value="70% train / 15% validation / 15% test" />
-          <ProfileRow icon={Scale} label="Version" value={`${card.name} v${card.version}`} />
-          <ProfileRow icon={Timer} label="Last Trained" value={fmtDateTime(latest.createdAt)} />
-        </dl>
-        <p className="mt-2 text-xs text-slate-500">No shuffling · 14-day embargo. All fields are read-only.</p>
-      </div>
-
-      {/* Why physics-guided */}
-      <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Why Physics-Guided?</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          The surrogate model does not rely only on historical patterns. Known physical relationships are embedded into the
-          model so predictions remain realistic and safe for data-center cooling operations.
-        </p>
-        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" aria-hidden /> IT Load
-            </p>
-            <p className="mt-2 font-mono text-sm text-cyan-300">IT Load ↑ → Cooling Power ↑</p>
-            <p className="mt-1 text-xs text-slate-400">As IT load increases, accessory cooling power should not decrease.</p>
+      <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
+        <Card title="Physics constraints" description="Enforced structurally — predictions can't violate them" icon={ShieldCheck}>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {[
+              ["IT load", "IT load ↑ → cooling power ↑", "More IT load never lowers accessory cooling power."],
+              ["Supply temperature", "Supply temp ↑ → chiller ↓", "Within safe bounds, warmer coolant never raises chiller demand."],
+              ["Ambient wet-bulb", "Wet-bulb ↑ → power ↑", "Hotter, more humid air never lowers cooling demand."],
+            ].map(([t, rule, d]) => (
+              <div key={t} className="rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line">
+                <p className="text-sm font-medium text-fg">{t}</p>
+                <p className="mt-2 font-mono text-xs text-accent">{rule}</p>
+                <p className="mt-2 text-xs leading-relaxed text-fg-subtle">{d}</p>
+              </div>
+            ))}
           </div>
-          <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" aria-hidden /> Coolant Supply Temp
-            </p>
-            <p className="mt-2 font-mono text-sm text-cyan-300">Coolant Supply Temp ↑ → Chiller Demand ↓</p>
-            <p className="mt-1 text-xs text-slate-400">
-              Within safe operating bounds, increasing coolant supply temperature should not increase chiller demand.
-            </p>
+          <p className="mt-5 text-xs font-medium text-fg-subtle">Hard guardrails · physical limits, not preferences</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {card.guardrails.map((g) => (
+              <Badge key={g} tone="warn">
+                {g}
+              </Badge>
+            ))}
           </div>
-          <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-slate-200">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" aria-hidden /> Ambient Wet-Bulb
-            </p>
-            <p className="mt-2 font-mono text-sm text-cyan-300">Wet-Bulb ↑ → Chiller / Facility Power ↑</p>
-            <p className="mt-1 text-xs text-slate-400">
-              Higher ambient wet-bulb conditions should not result in lower cooling power demand.
-            </p>
-          </div>
-        </div>
-      </div>
+        </Card>
 
-      {/* Hard guardrails */}
-      <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Hard Guardrails</h2>
-        <p className="mt-1 text-sm text-slate-400">These are physical operating boundaries, not optimization preferences.</p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {card.guardrails.map((g) => (
-            <span key={g} className="rounded-full border border-amber-500/50 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-300">
-              {g}
-            </span>
-          ))}
-        </div>
+        <Card title="Model profile" icon={FileBox}>
+          <dl className="divide-y divide-line">
+            {[
+              ["Algorithm", card.algorithm],
+              ["Serving", serving],
+              ["Runtime", runtime],
+              ["Split", card.temporalSplit],
+              ["Version", `${card.name} v${card.version}`],
+              ["Last evaluated", fmtDateTime(latest.createdAt)],
+            ].map(([k, v]) => (
+              <div key={k} className="flex flex-col gap-0.5 py-2.5 first:pt-0 last:pb-0 sm:flex-row sm:gap-4">
+                <dt className="w-32 shrink-0 text-xs text-fg-faint">{k}</dt>
+                <dd className="text-sm text-fg-muted">{v}</dd>
+              </div>
+            ))}
+          </dl>
+        </Card>
       </div>
-
-      {/* Model performance */}
-      <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Model Performance</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          The model is continuously evaluated against real measurements to ensure prediction quality remains reliable.
-        </p>
-        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <PerfCard
-            icon={Scale}
-            accent="#22d3ee"
-            label="MAE · Accessory Power"
-            value={`${latest.maeMw.toFixed(3)} MW`}
-            status="Meets target"
-            target={`≤ ${card.targets.maeMw.toFixed(3)} MW`}
-            explain="Average absolute error between predicted and measured accessory power."
-          />
-          <PerfCard
-            icon={CheckCircle2}
-            accent="#34d399"
-            label="PUE ±0.01 Coverage"
-            value={`${latest.pueCoverage.toFixed(1)}%`}
-            status="Meets target"
-            target={`≥ ${card.targets.pueCoveragePct.toFixed(1)}%`}
-            explain="Percentage of predictions where PUE error remains within ±0.01 of reality."
-          />
-          <PerfCard
-            icon={Timer}
-            accent="#22d3ee"
-            label="Inference Latency"
-            value={`${latest.inferenceLatencyMs.toFixed(1)} ms`}
-            status="Meets target"
-            target="p50 < 10 ms"
-            explain="Median time required to generate one prediction using ONNX inference."
-            note="Fast enough to evaluate thousands of what-if scenarios in real time."
-          />
-          <PerfCard
-            icon={BrainCircuit}
-            accent="#fbbf24"
-            label="KL Divergence"
-            value={latest.klDivergence.toFixed(3)}
-            status="Within safe bounds"
-            target={`warn ≥ ${card.drift.warnThreshold.toFixed(2)}`}
-            explain="Measures how much the latest data distribution has shifted from the model's training distribution."
-          />
-        </div>
-      </div>
-
-      {/* Continuous monitoring statement */}
-      <p className="py-2 text-center text-xs text-slate-500">
-        Predictions are verified against real measurements and continuously monitored for drift.
-      </p>
     </div>
   );
 }

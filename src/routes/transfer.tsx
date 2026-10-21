@@ -3,21 +3,47 @@ import {
   ArrowLeftRight,
   ArrowRight,
   Droplets,
-  Info,
+  History,
+  Loader2,
   Lock,
-  Thermometer,
+  Send,
+  SlidersHorizontal,
+  ThermometerSun,
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useToast } from "../components/Toast";
-import { ConfirmDialog, KindBadge, StatusBadge } from "../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  ConfirmDialog,
+  cx,
+  Meter,
+  PageHeader,
+  Segmented,
+  Select,
+  Skeleton,
+  Slider,
+  Stat,
+  Stepper,
+  Table,
+  Td,
+  Th,
+  TONE_TEXT,
+  usageTone,
+  type Tone,
+} from "../components/ui";
 import { api, type TransferListItem, type TransferResponse } from "../lib/api";
+import { useSim } from "../lib/simContext";
+import { fmtDateTime } from "../lib/time";
 import { proposeTransfer, type TransferContext } from "../lib/twin/transfer";
-import { GUARDRAILS, type FacilityView, type ZoneView } from "../lib/twin/types";
+import { GUARDRAILS, type ZoneView } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
 type ThermalBand = "excellent" | "good" | "warning" | "critical";
 type TransferMode = "both" | "power" | "water";
+type Status = "shadow" | "virtual" | "verify" | "apply" | "reject";
 
 function thermalBand(margin: number): ThermalBand {
   if (margin >= 8) return "excellent";
@@ -26,30 +52,22 @@ function thermalBand(margin: number): ThermalBand {
   return "critical";
 }
 
-const BAND_LABEL: Record<ThermalBand, string> = {
-  excellent: "Excellent",
-  good: "Good",
-  warning: "Warning",
-  critical: "Critical",
+const BAND: Record<ThermalBand, { label: string; tone: Tone }> = {
+  excellent: { label: "Excellent", tone: "info" },
+  good: { label: "Good", tone: "ok" },
+  warning: { label: "Warning", tone: "warn" },
+  critical: { label: "Critical", tone: "crit" },
 };
-const BAND_BADGE: Record<ThermalBand, "info" | "good" | "warn" | "bad"> = {
-  excellent: "info",
-  good: "good",
-  warning: "warn",
-  critical: "bad",
+
+// Server stores the last action name as the status.
+const STATUS: Record<Status, { label: string; tone: Tone }> = {
+  shadow: { label: "Proposed", tone: "neutral" },
+  virtual: { label: "Virtual", tone: "info" },
+  verify: { label: "Verified", tone: "violet" },
+  apply: { label: "Applied", tone: "ok" },
+  reject: { label: "Rejected", tone: "crit" },
 };
-const BAND_BAR: Record<ThermalBand, string> = {
-  excellent: "bg-cyan-500",
-  good: "bg-emerald-500",
-  warning: "bg-amber-400",
-  critical: "bg-red-500",
-};
-const BAND_STATUS: Record<ThermalBand, string> = {
-  excellent: "Normal",
-  good: "Normal",
-  warning: "High",
-  critical: "Critical",
-};
+const statusMeta = (s: string) => STATUS[s as Status] ?? { label: s, tone: "neutral" as Tone };
 
 const ctx = (z: ZoneView): TransferContext => ({
   itLoadMw: z.telemetry.itLoadMw,
@@ -61,66 +79,66 @@ const ctx = (z: ZoneView): TransferContext => ({
 });
 
 /* ------------------------------------------------------------------ */
-/* Small bits                                                          */
+/* Pieces                                                              */
 /* ------------------------------------------------------------------ */
 
-function ProgressBar({ pct, color }: { pct: number; color: string }) {
-  return (
-    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
-      <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, pct)}%` }} />
-    </div>
-  );
-}
-
-function ZoneCard({ zone }: { zone: ZoneView }) {
+function ZoneCard({ zone, role }: { zone: ZoneView; role: "source" | "target" | null }) {
   const band = thermalBand(zone.prediction.thermalMarginC);
   return (
-    <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">
+    <div
+      className={cx(
+        "rounded-2xl border bg-surface p-4 shadow-card transition-colors",
+        role === "source" ? "border-info/50" : role === "target" ? "border-warn/50" : "border-line",
+      )}
+    >
       <div className="flex items-center justify-between gap-2">
-        <p className="text-sm font-semibold text-slate-200">{zone.name}</p>
-        <StatusBadge tone={BAND_BADGE[band]}>{BAND_LABEL[band]}</StatusBadge>
+        <p className="text-sm font-semibold text-fg">{zone.name}</p>
+        <span className="flex items-center gap-1.5">
+          {role ? <Badge tone={role === "source" ? "info" : "warn"}>{role === "source" ? "Source" : "Target"}</Badge> : null}
+          <Badge tone={BAND[band].tone} dot>
+            {BAND[band].label}
+          </Badge>
+        </span>
       </div>
-      <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-slate-500">Chip Temp</p>
-          <p className="mt-0.5 font-mono text-base tabular-nums text-slate-100">{zone.prediction.chipTempC.toFixed(1)}°C</p>
-        </div>
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-slate-500">Margin</p>
-          <p className="mt-0.5 font-mono text-base tabular-nums text-slate-100">{zone.prediction.thermalMarginC.toFixed(1)}°C</p>
-        </div>
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-slate-500">Status</p>
-          <p className="mt-0.5 text-sm font-medium text-slate-200">{BAND_STATUS[band]}</p>
-        </div>
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <Stat label="Chip temp" value={`${zone.prediction.chipTempC.toFixed(1)}°C`} size="sm" />
+        <Stat label="Margin" value={`${zone.prediction.thermalMarginC.toFixed(1)}°C`} size="sm" tone={BAND[band].tone} />
       </div>
-      <div className="mt-3 space-y-2">
-        <div>
-          <div className="flex justify-between text-[10px] text-slate-400">
-            <span>Power Usage</span>
-            <span className="font-mono">{Math.round(zone.budgetUsage.powerPct)}%</span>
+      <div className="mt-3 space-y-2.5">
+        {(
+          [
+            ["Power", zone.budgetUsage.powerPct],
+            ["Water", zone.budgetUsage.waterPct],
+          ] as const
+        ).map(([k, v]) => (
+          <div key={k}>
+            <div className="flex justify-between text-[11px] text-fg-subtle">
+              <span>{k} budget</span>
+              <span className="tabular-nums">{Math.round(v)}%</span>
+            </div>
+            <Meter value={v} tone={usageTone(v)} className="mt-1" label={`${zone.name} ${k} budget usage`} />
           </div>
-          <ProgressBar pct={zone.budgetUsage.powerPct} color={BAND_BAR[band]} />
-        </div>
-        <div>
-          <div className="flex justify-between text-[10px] text-slate-400">
-            <span>Water Usage</span>
-            <span className="font-mono">{Math.round(zone.budgetUsage.waterPct)}%</span>
-          </div>
-          <ProgressBar pct={zone.budgetUsage.waterPct} color={BAND_BAR[band]} />
-        </div>
+        ))}
       </div>
     </div>
   );
 }
 
-function SummaryMetric({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: boolean }) {
+function BeforeAfter({ before, after, unit, goodWhen, digits = 1 }: { before: number; after: number; unit: string; goodWhen: "up" | "down"; digits?: number }) {
+  const d = after - before;
+  const good = Math.abs(d) < 1e-9 ? null : goodWhen === "up" ? d > 0 : d < 0;
   return (
-    <div className="px-2 text-center">
-      <p className="text-[10px] uppercase tracking-wider text-slate-500">{label}</p>
-      <p className={`mt-1 font-mono text-xl font-semibold tabular-nums ${accent ? "text-cyan-300" : "text-slate-100"}`}>{value}</p>
-      {sub ? <p className="mt-0.5 text-[10px] text-slate-500">{sub}</p> : null}
-    </div>
+    <span className="font-mono tabular-nums">
+      <span className="text-fg-subtle">
+        {before.toFixed(digits)}
+        {unit}
+      </span>
+      <span className="mx-1.5 text-fg-faint">→</span>
+      <span className={good === null ? "text-fg" : good ? "text-ok" : "text-warn"}>
+        {after.toFixed(digits)}
+        {unit}
+      </span>
+    </span>
   );
 }
 
@@ -130,8 +148,9 @@ function SummaryMetric({ label, value, sub, accent }: { label: string; value: st
 
 function TransferPage() {
   const toast = useToast();
-  const [views, setViews] = useState<ZoneView[]>([]);
-  const [aggregate, setAggregate] = useState<FacilityView | null>(null);
+  const { data, refresh } = useSim();
+  const views = useMemo(() => data?.zones ?? [], [data]);
+  const aggregate = data?.aggregate ?? null;
   const [sourceId, setSourceId] = useState<number | null>(null);
   const [targetId, setTargetId] = useState<number | null>(null);
   const [mode, setMode] = useState<TransferMode>("both");
@@ -139,551 +158,486 @@ function TransferPage() {
   const [powerDelta, setPowerDelta] = useState(0);
   const [active, setActive] = useState<TransferResponse | null>(null);
   const [confirmApply, setConfirmApply] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState<TransferListItem[]>([]);
-
-  const load = useCallback(async () => {
-    try {
-      const res = await api.telemetryCurrent();
-      setViews(res.zones);
-      setAggregate(res.aggregate);
-    } catch {
-      /* ignore */
-    }
-  }, []);
 
   const loadHistory = useCallback(async () => {
     try {
       setHistory((await api.listTransfers()).transfers);
     } catch {
-      /* ignore */
+      /* keep last good data */
     }
   }, []);
 
   useEffect(() => {
-    void load();
     void loadHistory();
-    const id = setInterval(() => void load(), 5000);
-    return () => clearInterval(id);
-  }, [load, loadHistory]);
+  }, [loadHistory]);
+
+  // Default to moving from the coolest zone to the hottest one.
+  useEffect(() => {
+    if (sourceId !== null || targetId !== null || views.length < 2) return;
+    const sorted = [...views].sort((a, b) => a.margin - b.margin);
+    setTargetId(sorted[0].id);
+    setSourceId(sorted[sorted.length - 1].id);
+  }, [views, sourceId, targetId]);
 
   const source = views.find((z) => z.id === sourceId) ?? null;
   const target = views.find((z) => z.id === targetId) ?? null;
 
   const maxWater = source ? Math.max(0, Math.floor(source.prediction.flowLpm - GUARDRAILS.flowMinLpm)) : 0;
   const maxPower = source ? Math.max(0, Math.round((source.prediction.chillerPowerMw - 0.05) * 100) / 100) : 0;
+  const effWater = mode !== "power" ? Math.min(waterDelta, maxWater) : 0;
+  const effPower = mode !== "water" ? Math.min(powerDelta, maxPower) : 0;
 
-  // Live impact, computed client-side from the surrogate transfer solver.
+  // Live impact from the same solver the worker runs.
   const proposal = useMemo(
-    () => (source && target ? proposeTransfer(ctx(target), ctx(source), waterDelta, powerDelta) : null),
-    [source, target, waterDelta, powerDelta],
+    () => (source && target ? proposeTransfer(ctx(target), ctx(source), effWater, effPower) : null),
+    [source, target, effWater, effPower],
   );
+
+  const resetAmounts = () => {
+    setWaterDelta(0);
+    setPowerDelta(0);
+    setActive(null);
+  };
 
   const swap = () => {
     setSourceId(targetId);
     setTargetId(sourceId);
-    setWaterDelta(0);
-    setPowerDelta(0);
+    resetAmounts();
   };
 
   const preview = async () => {
-    if (!source || !target) {
-      toast("Pick a source and a target zone.", "warning");
-      return;
-    }
+    if (!source || !target) return;
+    setBusy(true);
     try {
       const res = await api.createTransfer({
         sourceId: source.id,
         targetId: target.id,
-        waterDeltaLpm: mode !== "power" ? waterDelta : 0,
-        powerDeltaMw: mode !== "water" ? powerDelta : 0,
+        waterDeltaLpm: effWater,
+        powerDeltaMw: effPower,
       });
       setActive(res);
-      toast(res.feasible ? "Transfer proposed (shadow)." : "Transfer infeasible — check guardrails.", res.feasible ? "success" : "warning");
+      toast(
+        res.feasible ? `Transfer #${res.id} proposed in shadow.` : `Transfer #${res.id} is infeasible — check the guardrails.`,
+        res.feasible ? "success" : "warning",
+      );
       void loadHistory();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Transfer failed.", "error");
+    } finally {
+      setBusy(false);
     }
   };
 
   const transition = async (action: "virtual" | "verify" | "apply" | "reject") => {
     if (!active) return;
+    setBusy(true);
     try {
-      await api.transitionTransfer(active.id, action);
+      const res = await api.transitionTransfer(active.id, action);
       if (action === "apply") {
         toast(
-          `Transfer applied — budgets updated: ${source?.name} −${active.waterDeltaLpm} L/min · −${active.powerDeltaMw} MW, ${target?.name} +${active.waterDeltaLpm} L/min · +${active.powerDeltaMw} MW.`,
+          `Transfer #${active.id} applied — ${source?.name} −${active.waterDeltaLpm} L/min · −${active.powerDeltaMw} MW, ${target?.name} +${active.waterDeltaLpm} L/min · +${active.powerDeltaMw} MW.${res.slewLimited ? " Setpoints were slew-limited." : ""}`,
           "success",
         );
       } else {
-        toast(`Transfer ${action === "reject" ? "rejected" : action + "d"}.`, "success");
+        toast(`Transfer #${active.id} ${{ virtual: "applied virtually", verify: "verified", reject: "rejected" }[action]}.`, action === "reject" ? "info" : "success");
       }
-      setActive(null);
-      setConfirmApply(false);
+      // Terminal steps close the proposal; intermediate ones advance it.
+      if (action === "apply" || action === "reject") {
+        setActive(null);
+        setWaterDelta(0);
+        setPowerDelta(0);
+      } else {
+        setActive({ ...active, status: action });
+      }
       void loadHistory();
-      void load();
+      void refresh();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Transition failed.", "error");
+    } finally {
+      setBusy(false);
+      setConfirmApply(false);
     }
   };
 
-  const backupPower = aggregate ? Math.max(0, aggregate.budgets.powerMw - aggregate.accessoryPowerMw) : 0;
-  const backupWater = aggregate ? Math.max(0, aggregate.budgets.waterLpm - aggregate.waterLpm) : 0;
+  const headroomPower = aggregate ? Math.max(0, aggregate.budgets.powerMw - aggregate.accessoryPowerMw) : 0;
+  const headroomWater = aggregate ? Math.max(0, aggregate.budgets.waterLpm - aggregate.waterLpm) : 0;
+  const zoneName = (id: number) => views.find((z) => z.id === id)?.name ?? `Zone ${id}`;
+  const status = (active?.status ?? "shadow") as Status;
+  const canApply = !!active && active.feasible && active.withinFacility && status === "verify";
+
+  if (!aggregate) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-14 w-80" />
+        <Skeleton className="h-24" />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, i) => (
+            <Skeleton key={i} className="h-44" />
+          ))}
+        </div>
+        <Skeleton className="h-80" />
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-4">
-      {/* Page header */}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Cooling Transfer</h1>
-          <p className="text-sm text-slate-400">
-            Reallocate water flow and chiller power from a safe zone to a hot zone, behind guardrails and budgets.
-          </p>
-        </div>
-        <div className="flex items-center gap-3 text-[10px] text-slate-400">
-          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cyan-400" aria-hidden /> Excellent</span>
-          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-400" aria-hidden /> Good</span>
-          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-400" aria-hidden /> Warning</span>
-          <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-red-500" aria-hidden /> Critical</span>
-        </div>
-      </div>
+    <div className="animate-fade-up space-y-8">
+      <PageHeader
+        title="Cooling transfer"
+        description="Reallocate water flow and chiller power from a zone with headroom to one running hot — behind guardrails and budgets."
+      />
 
-      {/* Zone status cards */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {views.map((z) => (
-          <ZoneCard key={z.id} zone={z} />
+      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-line bg-line shadow-card lg:grid-cols-5">
+        {[
+          { label: "Total IT load", value: aggregate.itLoadMw.toFixed(2), unit: "MW" },
+          { label: "Power used", value: `${Math.round(aggregate.budgetUsage.powerPct)}%`, sub: `of ${aggregate.budgets.powerMw.toFixed(2)} MW` },
+          { label: "Water used", value: `${Math.round(aggregate.budgetUsage.waterPct)}%`, sub: `of ${aggregate.budgets.waterLpm.toLocaleString()} L/min` },
+          { label: "Power headroom", value: headroomPower.toFixed(2), unit: "MW", tone: "accent" as Tone },
+          { label: "Water headroom", value: Math.round(headroomWater).toLocaleString(), unit: "L/min", tone: "accent" as Tone },
+        ].map((s, i) => (
+          <div key={s.label} className={cx("bg-surface px-5 py-4", i === 4 && "col-span-2 lg:col-span-1")}>
+            <Stat label={s.label} value={s.value} unit={s.unit} sub={s.sub} tone={s.tone} />
+          </div>
         ))}
       </div>
 
-      {/* Total system summary */}
-      {aggregate ? (
-        <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Total System Summary</h2>
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-3">
-            <div className="flex flex-1 flex-wrap items-center justify-around divide-x divide-slate-800">
-              <SummaryMetric label="Total IT Load" value={`${aggregate.itLoadMw.toFixed(2)} MW`} />
-              <SummaryMetric label="Total Power Usage" value={`${Math.round(aggregate.budgetUsage.powerPct)}%`} sub={`of ${aggregate.budgets.powerMw.toFixed(2)} MW budget`} />
-              <SummaryMetric label="Total Water Usage" value={`${Math.round(aggregate.budgetUsage.waterPct)}%`} sub={`of ${aggregate.budgets.waterLpm.toLocaleString()} L/min budget`} />
-              <SummaryMetric label="Available Backup Power" value={`${backupPower.toFixed(2)} MW`} accent />
-              <SummaryMetric label="Available Backup Water" value={`${Math.round(backupWater)} L/min`} accent />
-            </div>
-            <div className="flex items-start gap-1.5 text-xs text-slate-400 sm:max-w-56">
-              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan-400" aria-hidden />
-              Transfer helps improve thermal margin on critical zones by reallocating underutilized resources.
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {views.map((z) => (
+          <ZoneCard key={z.id} zone={z} role={z.id === sourceId ? "source" : z.id === targetId ? "target" : null} />
+        ))}
+      </div>
 
-      {/* Transfer configuration */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_auto_1fr_1.2fr]">
-        {/* Source */}
-        <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-          <h3 className="text-sm font-semibold text-slate-200">1. Select Source</h3>
-          <p className="text-[10px] uppercase tracking-wider text-slate-500">(Safe zone or backup)</p>
-
-          <div className="mt-3 space-y-2">
-            <div>
-              <label className="flex items-center gap-2 text-sm text-slate-200">
-                <input type="radio" name="source" checked onChange={() => {}} className="accent-cyan-400" />
-                From Zone
-              </label>
-              <div className="mt-2">
-                <select
-                  value={sourceId ?? ""}
-                  onChange={(e) => setSourceId(e.target.value ? Number(e.target.value) : null)}
-                  aria-label="Source zone"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus-visible:outline-2 focus-visible:outline-cyan-400"
-                >
-                  <option value="">Select zone…</option>
-                  {views.filter((z) => z.id !== targetId).map((z) => (
-                    <option key={z.id} value={z.id}>
-                      {z.name} · {BAND_LABEL[thermalBand(z.prediction.thermalMarginC)]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="mt-2 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-                <p className="text-[10px] uppercase tracking-wider text-slate-500">Available to transfer</p>
-                <div className="mt-1 flex gap-4 text-sm">
-                  <span className="flex items-center gap-1.5 text-slate-300">
-                    <Zap className="h-3.5 w-3.5 text-amber-300" aria-hidden /> Power
-                    <span className="font-mono text-slate-100">{maxPower.toFixed(2)} MW</span>
-                  </span>
-                  <span className="flex items-center gap-1.5 text-slate-300">
-                    <Droplets className="h-3.5 w-3.5 text-cyan-300" aria-hidden /> Water
-                    <span className="font-mono text-slate-100">{maxWater} L/min</span>
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="opacity-50">
-              <label className="flex items-center gap-2 text-sm text-slate-400">
-                <input type="radio" name="source" disabled className="accent-cyan-400" />
-                From Backup Supply
-              </label>
-              <div className="mt-2">
-                <select disabled className="w-full rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-sm text-slate-500">
-                  <option>Backup Supply</option>
-                </select>
-              </div>
-              <div className="mt-2 rounded-lg border border-slate-800/60 bg-slate-950/30 p-3">
-                <p className="text-[10px] uppercase tracking-wider text-slate-600">Available</p>
-                <div className="mt-1 flex gap-4 text-sm text-slate-500">
-                  <span className="font-mono">{backupPower.toFixed(2)} MW</span>
-                  <span className="font-mono">{Math.round(backupWater)} L/min</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Transfer direction */}
-        <div className="flex items-center justify-center">
-          <button
-            type="button"
-            onClick={swap}
-            disabled={!source || !target}
-            aria-label="Swap source and target"
-            className="rounded-full border border-cyan-400/60 bg-slate-900 p-3 text-cyan-300 shadow-lg shadow-cyan-500/10 hover:bg-cyan-500/10 focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40"
-          >
-            <ArrowLeftRight className="h-5 w-5" aria-hidden />
-          </button>
-        </div>
-
-        {/* Target */}
-        <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-          <h3 className="text-sm font-semibold text-slate-200">2. Select Target Zone</h3>
-          <p className="text-[10px] uppercase tracking-wider text-slate-500">(Hot zone)</p>
-          <div className="mt-3">
-            <select
-              value={targetId ?? ""}
-              onChange={(e) => setTargetId(e.target.value ? Number(e.target.value) : null)}
-              aria-label="Target zone"
-              className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 focus-visible:outline-2 focus-visible:outline-cyan-400"
+      <Card title="Configure transfer" description="Pick a donor and a recipient, then size the move" icon={SlidersHorizontal}>
+        <div className="grid items-stretch gap-3 lg:grid-cols-[1fr_auto_1fr]">
+          <div className="rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line">
+            <label htmlFor="source" className="text-xs font-medium text-info">
+              From · source zone
+            </label>
+            <Select
+              id="source"
+              className="mt-1.5"
+              value={sourceId ?? ""}
+              onChange={(e) => {
+                setSourceId(e.target.value ? Number(e.target.value) : null);
+                resetAmounts();
+              }}
             >
               <option value="">Select zone…</option>
-              {views.filter((z) => z.id !== sourceId).map((z) => (
-                <option key={z.id} value={z.id}>
-                  {z.name} · {BAND_LABEL[thermalBand(z.prediction.thermalMarginC)]}
-                </option>
-              ))}
-            </select>
+              {views
+                .filter((z) => z.id !== targetId)
+                .map((z) => (
+                  <option key={z.id} value={z.id}>
+                    {z.name} · {BAND[thermalBand(z.prediction.thermalMarginC)].label}
+                  </option>
+                ))}
+            </Select>
+            <div className="mt-3 flex gap-6 text-xs">
+              <span className="text-fg-subtle">
+                Can give <span className="font-mono font-medium text-fg">{maxPower.toFixed(2)} MW</span>
+              </span>
+              <span className="text-fg-subtle">
+                <span className="font-mono font-medium text-fg">{maxWater} L/min</span>
+              </span>
+            </div>
           </div>
-          <div className="mt-2 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500">Current load</p>
-            <div className="mt-1 flex gap-4 text-sm">
-              <span className="flex items-center gap-1.5 text-slate-300">
-                <Zap className="h-3.5 w-3.5 text-amber-300" aria-hidden /> Power
-                <span className={`font-mono ${target && target.budgetUsage.powerPct >= 90 ? "text-red-300" : "text-slate-100"}`}>
+
+          <div className="flex items-center justify-center">
+            <button
+              type="button"
+              onClick={swap}
+              disabled={!source || !target}
+              aria-label="Swap source and target"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-surface text-fg-muted ring-1 ring-inset ring-line-strong transition-colors hover:text-accent hover:ring-accent/50 focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40"
+            >
+              <ArrowLeftRight className="h-4 w-4" aria-hidden />
+            </button>
+          </div>
+
+          <div className="rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line">
+            <label htmlFor="target" className="text-xs font-medium text-warn">
+              To · target zone
+            </label>
+            <Select
+              id="target"
+              className="mt-1.5"
+              value={targetId ?? ""}
+              onChange={(e) => {
+                setTargetId(e.target.value ? Number(e.target.value) : null);
+                resetAmounts();
+              }}
+            >
+              <option value="">Select zone…</option>
+              {views
+                .filter((z) => z.id !== sourceId)
+                .map((z) => (
+                  <option key={z.id} value={z.id}>
+                    {z.name} · {BAND[thermalBand(z.prediction.thermalMarginC)].label}
+                  </option>
+                ))}
+            </Select>
+            <div className="mt-3 flex gap-6 text-xs">
+              <span className="text-fg-subtle">
+                Power{" "}
+                <span className={cx("font-mono font-medium", target && target.budgetUsage.powerPct >= 90 ? "text-crit" : "text-fg")}>
                   {target ? `${Math.round(target.budgetUsage.powerPct)}%` : "—"}
                 </span>
               </span>
-              <span className="flex items-center gap-1.5 text-slate-300">
-                <Droplets className="h-3.5 w-3.5 text-cyan-300" aria-hidden /> Water
-                <span className={`font-mono ${target && target.budgetUsage.waterPct >= 90 ? "text-red-300" : "text-slate-100"}`}>
+              <span className="text-fg-subtle">
+                Water{" "}
+                <span className={cx("font-mono font-medium", target && target.budgetUsage.waterPct >= 90 ? "text-crit" : "text-fg")}>
                   {target ? `${Math.round(target.budgetUsage.waterPct)}%` : "—"}
                 </span>
               </span>
             </div>
           </div>
-          <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500">Objective</p>
-            <p className="mt-1 text-xs text-slate-400">
-              Increase thermal margin on the target zone by reallocating underutilized resources without violating limits.
+        </div>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_1fr]">
+          <div className="space-y-5">
+            <Segmented
+              ariaLabel="Transfer type"
+              size="sm"
+              value={mode}
+              onChange={(m) => {
+                setMode(m);
+                if (m === "power") setWaterDelta(0);
+                if (m === "water") setPowerDelta(0);
+              }}
+              options={[
+                { value: "both", label: "Power & water" },
+                { value: "power", label: "Power only" },
+                { value: "water", label: "Water only" },
+              ]}
+            />
+            {mode !== "water" ? (
+              <div>
+                <div className="flex items-baseline justify-between text-xs">
+                  <label htmlFor="power" className="flex items-center gap-1.5 font-medium text-fg-muted">
+                    <Zap className="h-3.5 w-3.5 text-warn" aria-hidden /> Chiller power
+                  </label>
+                  <span className="font-mono tabular-nums text-fg">{effPower.toFixed(2)} MW</span>
+                </div>
+                <div className="mt-2">
+                  <Slider id="power" value={effPower} min={0} max={maxPower || 0.01} step={0.01} onChange={setPowerDelta} disabled={!source || !target} tone="warn" />
+                </div>
+                <p className="mt-1 text-[11px] text-fg-faint">0 – {maxPower.toFixed(2)} MW available</p>
+              </div>
+            ) : null}
+            {mode !== "power" ? (
+              <div>
+                <div className="flex items-baseline justify-between text-xs">
+                  <label htmlFor="water" className="flex items-center gap-1.5 font-medium text-fg-muted">
+                    <Droplets className="h-3.5 w-3.5 text-info" aria-hidden /> Water flow
+                  </label>
+                  <span className="font-mono tabular-nums text-fg">{effWater} L/min</span>
+                </div>
+                <div className="mt-2">
+                  <Slider id="water" value={effWater} min={0} max={maxWater || 1} step={10} onChange={setWaterDelta} disabled={!source || !target} tone="info" />
+                </div>
+                <p className="mt-1 text-[11px] text-fg-faint">0 – {maxWater} L/min above the {GUARDRAILS.flowMinLpm} L/min floor</p>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line">
+            <p className="flex items-center gap-1.5 text-xs font-medium text-fg-muted">
+              <ThermometerSun className="h-3.5 w-3.5" aria-hidden /> Estimated impact
             </p>
+            {proposal && source && target ? (
+              <>
+                <dl className="mt-3 grid grid-cols-2 gap-4">
+                  <div>
+                    <dt className="text-[11px] text-fg-faint">{target.name} margin</dt>
+                    <dd className="mt-1 text-sm">
+                      <BeforeAfter before={target.prediction.thermalMarginC} after={proposal.target.prediction.thermalMarginC} unit="°C" goodWhen="up" />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[11px] text-fg-faint">{target.name} chip</dt>
+                    <dd className="mt-1 text-sm">
+                      <BeforeAfter before={target.prediction.chipTempC} after={proposal.target.prediction.chipTempC} unit="°C" goodWhen="down" />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[11px] text-fg-faint">{source.name} margin</dt>
+                    <dd className="mt-1 text-sm">
+                      <BeforeAfter before={source.prediction.thermalMarginC} after={proposal.source.prediction.thermalMarginC} unit="°C" goodWhen="up" />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[11px] text-fg-faint">Guardrails</dt>
+                    <dd className="mt-1">
+                      <Badge tone={proposal.feasible ? "ok" : "crit"} dot>
+                        {proposal.feasible ? "All within limits" : `${proposal.violations.length} violation(s)`}
+                      </Badge>
+                    </dd>
+                  </div>
+                </dl>
+                <Button
+                  variant="primary"
+                  className="mt-4 w-full"
+                  onClick={() => void preview()}
+                  disabled={busy || (effWater === 0 && effPower === 0) || active != null}
+                >
+                  {busy && !active ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
+                  Propose transfer (shadow)
+                </Button>
+              </>
+            ) : (
+              <p className="mt-3 text-sm text-fg-subtle">Pick a source and a target zone to see the impact.</p>
+            )}
           </div>
         </div>
+      </Card>
 
-        {/* Amount to transfer */}
-        <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-          <h3 className="text-sm font-semibold text-slate-200">3. Amount to Transfer</h3>
+      {active && source && target ? (
+        <Card
+          title={`Transfer #${active.id}`}
+          description={`${source.name} → ${target.name} · ${active.waterDeltaLpm} L/min · ${active.powerDeltaMw} MW`}
+          icon={ArrowRight}
+          action={
+            <span className="flex flex-wrap gap-1.5">
+              <Badge tone={active.feasible ? "ok" : "crit"}>{active.feasible ? "Feasible" : "Infeasible"}</Badge>
+              <Badge tone={active.withinFacility ? "ok" : "warn"}>{active.withinFacility ? "Within facility budget" : "Exceeds facility budget"}</Badge>
+            </span>
+          }
+        >
+          <Stepper
+            steps={[
+              { label: "Proposed", detail: "Shadow", state: "done" },
+              { label: "Applied virtually", detail: "Digital twin only", state: status === "shadow" ? "active" : "done" },
+              { label: "Verified", detail: "Operator check", state: status === "verify" ? "done" : status === "virtual" ? "active" : "pending" },
+              { label: "Applied", detail: "Setpoints + budgets", state: status === "verify" ? "active" : "pending" },
+            ]}
+          />
 
-          <div className="mt-3 flex gap-1" role="tablist" aria-label="Transfer type">
-            {(["both", "power", "water"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                role="tab"
-                aria-selected={mode === m}
-                onClick={() => {
-                  setMode(m);
-                  if (m === "power") setWaterDelta(0);
-                  if (m === "water") setPowerDelta(0);
-                }}
-                className={`rounded-md border px-2.5 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-                  mode === m ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 text-slate-400 hover:bg-slate-800"
-                }`}
-              >
-                {m === "both" ? "Power & Water" : m === "power" ? "Power Only" : "Water Only"}
-              </button>
-            ))}
-          </div>
-
-          {mode !== "water" ? (
-            <div className="mt-4">
-              <label className="flex items-center justify-between text-sm text-slate-300">
-                <span className="flex items-center gap-1.5">
-                  Power to transfer <Info className="h-3.5 w-3.5 text-slate-500" aria-hidden />
-                </span>
-                <span className="font-mono text-cyan-300">{powerDelta.toFixed(2)} MW</span>
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={maxPower}
-                step={0.01}
-                value={powerDelta}
-                onChange={(e) => setPowerDelta(Number(e.target.value))}
-                disabled={!source}
-                className="mt-2 w-full accent-cyan-400 focus-visible:outline-2 focus-visible:outline-cyan-400"
-              />
-              <span className="text-[10px] text-slate-500">0 – {maxPower.toFixed(2)} MW</span>
-            </div>
-          ) : null}
-
-          {mode !== "power" ? (
-            <div className="mt-4">
-              <label className="flex items-center justify-between text-sm text-slate-300">
-                <span className="flex items-center gap-1.5">
-                  Water to transfer <Info className="h-3.5 w-3.5 text-slate-500" aria-hidden />
-                </span>
-                <span className="font-mono text-cyan-300">{waterDelta} L/min</span>
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={maxWater}
-                step={10}
-                value={waterDelta}
-                onChange={(e) => setWaterDelta(Number(e.target.value))}
-                disabled={!source}
-                className="mt-2 w-full accent-cyan-400 focus-visible:outline-2 focus-visible:outline-cyan-400"
-              />
-              <span className="text-[10px] text-slate-500">0 – {maxWater} L/min</span>
-            </div>
-          ) : null}
-
-          {/* Estimated impact */}
-          {proposal ? (
-            <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-              <p className="text-[10px] font-medium uppercase tracking-wider text-slate-400">Estimated impact after transfer</p>
-              <div className="mt-2 grid grid-cols-2 gap-3">
-                <div>
-                  <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-500">
-                    <Thermometer className="h-3 w-3 text-emerald-400" aria-hidden /> Thermal Margin
-                  </p>
-                  <p className="mt-1 font-mono text-sm tabular-nums text-slate-200">
-                    {target?.prediction.thermalMarginC.toFixed(1)}°C →{" "}
-                    <span className="text-emerald-300">{proposal.target.prediction.thermalMarginC.toFixed(1)}°C</span>
-                  </p>
-                  <p className="text-[10px] text-emerald-300">
-                    (+{(proposal.target.prediction.thermalMarginC - (target?.prediction.thermalMarginC ?? 0)).toFixed(1)}°C)
-                  </p>
-                </div>
-                <div>
-                  <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-slate-500">
-                    <Thermometer className="h-3 w-3 text-cyan-400" aria-hidden /> Chip Temp
-                  </p>
-                  <p className="mt-1 font-mono text-sm tabular-nums text-slate-200">
-                    {target?.prediction.chipTempC.toFixed(1)}°C →{" "}
-                    <span className="text-emerald-300">{proposal.target.prediction.chipTempC.toFixed(1)}°C</span>
-                  </p>
-                  <p className="text-[10px] text-emerald-300">
-                    ({(proposal.target.prediction.chipTempC - (target?.prediction.chipTempC ?? 0)).toFixed(1)}°C)
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      </div>
-
-      {/* Transfer preview */}
-      {source && target && proposal ? (
-        <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Transfer Preview</h2>
-              <p className="text-xs text-slate-500">(Before → After)</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => void preview()}
-              className="inline-flex items-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 hover:bg-cyan-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-            >
-              <ArrowRight className="h-4 w-4" aria-hidden />
-              Preview Transfer (Shadow)
-            </button>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">
-            Simulate the transfer in Shadow Validation before applying to the real engine.
-          </p>
-
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[560px] text-left text-sm">
+          <div className="mt-6">
+            <Table minWidth={560}>
               <thead>
-                <tr className="border-b border-slate-700 text-xs uppercase tracking-wider text-slate-400">
-                  <th className="px-2 py-2">Zone</th>
-                  <th className="px-2 py-2">Power Usage</th>
-                  <th className="px-2 py-2">Water Usage</th>
-                  <th className="px-2 py-2">Thermal Margin</th>
-                  <th className="px-2 py-2">Chip Temp</th>
+                <tr>
+                  <Th>Zone</Th>
+                  <Th>Power budget</Th>
+                  <Th>Water budget</Th>
+                  <Th>Thermal margin</Th>
+                  <Th>Chip temp</Th>
                 </tr>
               </thead>
               <tbody>
-                <PreviewRow
-                  label={`${source.name} (Source)`}
-                  powerBefore={source.budgetUsage.powerPct}
-                  powerAfter={(proposal.source.prediction.accessoryPowerMw / source.budgets.powerMw) * 100}
-                  waterBefore={source.budgetUsage.waterPct}
-                  waterAfter={(proposal.source.prediction.flowLpm / source.budgets.waterLpm) * 100}
-                  marginBefore={source.prediction.thermalMarginC}
-                  marginAfter={proposal.source.prediction.thermalMarginC}
-                  chipBefore={source.prediction.chipTempC}
-                  chipAfter={proposal.source.prediction.chipTempC}
-                />
-                <PreviewRow
-                  label={`${target.name} (Target)`}
-                  powerBefore={target.budgetUsage.powerPct}
-                  powerAfter={(proposal.target.prediction.accessoryPowerMw / target.budgets.powerMw) * 100}
-                  waterBefore={target.budgetUsage.waterPct}
-                  waterAfter={(proposal.target.prediction.flowLpm / target.budgets.waterLpm) * 100}
-                  marginBefore={target.prediction.thermalMarginC}
-                  marginAfter={proposal.target.prediction.thermalMarginC}
-                  chipBefore={target.prediction.chipTempC}
-                  chipAfter={proposal.target.prediction.chipTempC}
-                />
-              </tbody>
-            </table>
-          </div>
-
-          {/* Proposal status + transitions */}
-          {active ? (
-            <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-sm">
-              <div className="flex flex-wrap items-center gap-2">
-                <StatusBadge tone={active.feasible ? "good" : "bad"}>{active.feasible ? "feasible" : "infeasible"}</StatusBadge>
-                <StatusBadge tone={active.withinFacility ? "good" : "warn"}>
-                  {active.withinFacility ? "within facility budget" : "exceeds facility budget"}
-                </StatusBadge>
-                <span className="text-xs text-slate-400">status: {active.status}</span>
-              </div>
-              {active.violations.length ? (
-                <ul className="mt-2 text-xs text-red-300">
-                  {active.violations.map((v, i) => (
-                    <li key={i}>· {v.message}</li>
-                  ))}
-                </ul>
-              ) : null}
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button type="button" onClick={() => void transition("virtual")} className="rounded-lg border border-cyan-500/50 px-3 py-1.5 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10">
-                  1 · Apply virtually
-                </button>
-                <button type="button" onClick={() => void transition("verify")} className="rounded-lg border border-amber-500/50 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/10">
-                  2 · Verify
-                </button>
-                <button type="button" onClick={() => setConfirmApply(true)} disabled={!active.feasible} className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-50">
-                  3 · Transfer (apply budgets)
-                </button>
-                <button type="button" onClick={() => void transition("reject")} className="rounded-lg border border-red-500/50 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-500/10">
-                  Reject
-                </button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* History */}
-      {history.length ? (
-        <div className="rounded-2xl border border-slate-700/60 bg-gradient-to-b from-slate-900/70 to-slate-900/40 p-4">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Recent Transfers</h2>
-          <div className="mt-3 overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-slate-700 text-slate-400">
-                  <th className="py-1 pr-2">#</th>
-                  <th className="py-1 pr-2">From → To</th>
-                  <th className="py-1 pr-2">Water</th>
-                  <th className="py-1 pr-2">Power</th>
-                  <th className="py-1 pr-2">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.slice(0, 10).map((t) => (
-                  <tr key={t.id} className="border-b border-slate-800/60">
-                    <td className="py-1 pr-2 font-mono">{t.id}</td>
-                    <td className="py-1 pr-2 font-mono">
-                      {views.find((z) => z.id === t.sourceId)?.name ?? t.sourceId} → {views.find((z) => z.id === t.targetId)?.name ?? t.targetId}
-                    </td>
-                    <td className="py-1 pr-2 font-mono">{t.waterDeltaLpm} L/min</td>
-                    <td className="py-1 pr-2 font-mono">{t.powerDeltaMw} MW</td>
-                    <td className="py-1 pr-2">
-                      <KindBadge kind={t.status === "applied" ? "applied" : t.status === "rejected" ? "fail_safe" : "would_be"} />
-                    </td>
+                {(
+                  [
+                    ["Source", source, active.source],
+                    ["Target", target, active.target],
+                  ] as const
+                ).map(([role, z, prop]) => (
+                  <tr key={role}>
+                    <Td>
+                      <span className="font-medium text-fg">{z.name}</span>{" "}
+                      <span className={cx("text-xs", role === "Source" ? TONE_TEXT.info : TONE_TEXT.warn)}>{role}</span>
+                    </Td>
+                    <Td>
+                      <BeforeAfter before={z.budgetUsage.powerPct} after={(prop.prediction.accessoryPowerMw / z.budgets.powerMw) * 100} unit="%" goodWhen="down" digits={0} />
+                    </Td>
+                    <Td>
+                      <BeforeAfter before={z.budgetUsage.waterPct} after={(prop.prediction.flowLpm / z.budgets.waterLpm) * 100} unit="%" goodWhen="down" digits={0} />
+                    </Td>
+                    <Td>
+                      <BeforeAfter before={z.prediction.thermalMarginC} after={prop.prediction.thermalMarginC} unit="°C" goodWhen="up" />
+                    </Td>
+                    <Td>
+                      <BeforeAfter before={z.prediction.chipTempC} after={prop.prediction.chipTempC} unit="°C" goodWhen="down" />
+                    </Td>
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </Table>
           </div>
-        </div>
+
+          {active.violations.length ? (
+            <ul className="mt-4 space-y-1 rounded-xl bg-crit/5 p-3 text-xs text-crit ring-1 ring-inset ring-crit/20">
+              {active.violations.map((v, i) => (
+                <li key={i}>{v.message}</li>
+              ))}
+            </ul>
+          ) : null}
+
+          <div className="mt-5 flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => void transition("virtual")} disabled={busy || status !== "shadow"}>
+              1 · Apply virtually
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void transition("verify")} disabled={busy || status !== "virtual"}>
+              2 · Verify
+            </Button>
+            <Button variant="success" size="sm" onClick={() => setConfirmApply(true)} disabled={busy || !canApply}>
+              3 · Apply transfer
+            </Button>
+            <Button variant="ghost" size="sm" className="text-crit hover:text-crit" onClick={() => void transition("reject")} disabled={busy}>
+              Reject
+            </Button>
+            {!active.withinFacility ? (
+              <p className="text-xs text-warn">Applying is blocked while the facility budget would be exceeded.</p>
+            ) : null}
+          </div>
+        </Card>
       ) : null}
 
-      {/* Bottom guardrail message */}
-      <p className="flex items-center justify-center gap-1.5 py-2 text-center text-xs text-slate-500">
+      <Card title="Recent transfers" description="The 10 most recent proposals" icon={History}>
+        {history.length === 0 ? (
+          <p className="text-sm text-fg-subtle">No transfers yet.</p>
+        ) : (
+          <Table minWidth={560}>
+            <thead>
+              <tr>
+                <Th>#</Th>
+                <Th>Route</Th>
+                <Th right>Water</Th>
+                <Th right>Power</Th>
+                <Th>Status</Th>
+                <Th className="text-right">Created</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.slice(0, 10).map((t) => {
+                const s = statusMeta(t.status);
+                return (
+                  <tr key={t.id}>
+                    <Td className="font-mono text-xs">#{t.id}</Td>
+                    <Td>
+                      <span className="text-fg">{zoneName(t.sourceId)}</span>
+                      <ArrowRight className="mx-1.5 inline h-3 w-3 text-fg-faint" aria-hidden />
+                      <span className="text-fg">{zoneName(t.targetId)}</span>
+                    </Td>
+                    <Td right>{t.waterDeltaLpm} L/min</Td>
+                    <Td right>{t.powerDeltaMw} MW</Td>
+                    <Td>
+                      <Badge tone={s.tone}>{s.label}</Badge>
+                    </Td>
+                    <Td className="text-right text-xs text-fg-subtle">{fmtDateTime(t.createdAt)}</Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </Table>
+        )}
+      </Card>
+
+      <p className="flex items-center justify-center gap-1.5 text-center text-xs text-fg-faint">
         <Lock className="h-3.5 w-3.5" aria-hidden />
-        All transfers respect guardrails, capacity limits, and business priorities.
+        Transfers are re-checked against live guardrails and pass through the slew-rate limiter when applied.
       </p>
 
       <ConfirmDialog
         open={confirmApply}
         title="Apply this transfer?"
-        body={`This writes the transferred setpoints to both zones' controllers and reallocates their budgets: ${source?.name ?? ""} gives up ${active?.waterDeltaLpm ?? 0} L/min water and ${active?.powerDeltaMw ?? 0} MW power, ${target?.name ?? ""} gains the same. Slew limits and guardrails remain enforced.`}
+        body={`Writes the transferred setpoints to both zones (slew-limited) and moves budget: ${source?.name ?? ""} gives up ${active?.waterDeltaLpm ?? 0} L/min and ${active?.powerDeltaMw ?? 0} MW, ${target?.name ?? ""} gains the same. Guardrails are re-checked on live telemetry first.`}
         confirmLabel="Apply transfer"
         tone="danger"
+        busy={busy}
         onConfirm={() => void transition("apply")}
         onCancel={() => setConfirmApply(false)}
       />
     </div>
-  );
-}
-
-function PreviewRow({
-  label,
-  powerBefore,
-  powerAfter,
-  waterBefore,
-  waterAfter,
-  marginBefore,
-  marginAfter,
-  chipBefore,
-  chipAfter,
-}: {
-  label: string;
-  powerBefore: number;
-  powerAfter: number;
-  waterBefore: number;
-  waterAfter: number;
-  marginBefore: number;
-  marginAfter: number;
-  chipBefore: number;
-  chipAfter: number;
-}) {
-  const pct = (b: number, a: number) => `${Math.round(b)}% → ${Math.round(a)}%`;
-  const goodMargin = marginAfter >= marginBefore;
-  const goodChip = chipAfter <= chipBefore;
-  return (
-    <tr className="border-b border-slate-800/60">
-      <td className="px-2 py-2 font-medium text-slate-200">{label}</td>
-      <td className="px-2 py-2 font-mono tabular-nums">{pct(powerBefore, powerAfter)}</td>
-      <td className="px-2 py-2 font-mono tabular-nums">{pct(waterBefore, waterAfter)}</td>
-      <td className="px-2 py-2 font-mono tabular-nums">
-        {marginBefore.toFixed(1)}°C → <span className={goodMargin ? "text-emerald-300" : "text-amber-300"}>{marginAfter.toFixed(1)}°C {goodMargin ? "↑" : "↓"}</span>
-      </td>
-      <td className="px-2 py-2 font-mono tabular-nums">
-        {chipBefore.toFixed(1)}°C → <span className={goodChip ? "text-emerald-300" : "text-amber-300"}>{chipAfter.toFixed(1)}°C {goodChip ? "↓" : "↑"}</span>
-      </td>
-    </tr>
   );
 }
 

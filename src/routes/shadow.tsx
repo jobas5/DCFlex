@@ -1,420 +1,430 @@
-import { createRoute, useNavigate, useSearch } from "@tanstack/react-router";
-import { CheckCircle2, Droplets, HeartPulse, Info, Zap } from "lucide-react";
+import { createRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
+import {
+  Activity,
+  Check,
+  FlaskConical,
+  HeartPulse,
+  ListChecks,
+  Loader2,
+  Power,
+  ScrollText,
+  SlidersHorizontal,
+  Undo2,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { LineChart } from "../components/LineChart";
 import { useToast } from "../components/Toast";
-import { Panel, StatusBadge, Stepper, Table, Td, Th } from "../components/ui";
+import {
+  Badge,
+  Button,
+  buttonStyles,
+  Card,
+  ConfirmDialog,
+  cx,
+  EmptyState,
+  KindBadge,
+  PageHeader,
+  Segmented,
+  Setpoints as SetpointChips,
+  Skeleton,
+  Slider,
+  Stat,
+  Stepper,
+  Table,
+  Td,
+  Th,
+  TONE_TEXT,
+} from "../components/ui";
 import { api, type ControlResponse, type ControlZoneView, type ValidationResponse } from "../lib/api";
 import { useSim } from "../lib/simContext";
+import { fmtDateTime, fmtTick } from "../lib/time";
 import { CHART } from "../lib/tokens";
-import { fmtTick } from "../lib/time";
-import { GUARDRAILS, type Setpoints } from "../lib/twin/types";
+import { GUARDRAILS, MARGIN_TIERS, type Setpoints } from "../lib/twin/types";
 import { rootRoute } from "./root";
 
-function clamp01(v: number) {
-  return Math.max(0, Math.min(1, v));
-}
+const pct = (v: number) => `${Math.round(v * 100)}%`;
 
-/* ------------------------------------------------------------------ */
-/* Virtual Simulation — validation charts + metrics + readings          */
-/* ------------------------------------------------------------------ */
-
-function ValidationPanel({ zone }: { zone: ControlZoneView }) {
-  const { data: live } = useSim();
+function useValidation(zoneId: number) {
   const [data, setData] = useState<ValidationResponse | null>(null);
-  const [showAll, setShowAll] = useState(false);
-
   const load = useCallback(async () => {
     try {
-      setData(await api.getValidation(zone.id));
+      setData(await api.getValidation(zoneId));
     } catch {
-      /* ignore */
+      /* keep last good data */
     }
-  }, [zone.id]);
-
+  }, [zoneId]);
   useEffect(() => {
+    setData(null);
     void load();
     const id = setInterval(() => void load(), 5000);
     return () => clearInterval(id);
   }, [load]);
+  return { data, reload: load };
+}
 
-  const liveZone = useMemo(() => live?.zones.find((z) => z.id === zone.id), [live, zone.id]);
-  const waterBudgetPct = liveZone?.budgetUsage.waterPct ?? null;
+/* ------------------------------------------------------------------ */
+/* Validation (shadow prediction vs live config)                        */
+/* ------------------------------------------------------------------ */
+
+function ValidationCard({ zone, data }: { zone: ControlZoneView; data: ValidationResponse | null }) {
+  const [showAll, setShowAll] = useState(false);
 
   if (!data) {
-    return <Panel title="1 — Virtual Simulation"><p className="text-sm text-slate-400">Loading validation…</p></Panel>;
+    return (
+      <Card title="Validation" icon={Activity}>
+        <Skeleton className="h-64" />
+      </Card>
+    );
   }
 
-  const labels = data.samples.map((s) => fmtTick(s.tick));
-  const last = data.samples[data.samples.length - 1];
+  if (!data.hasShadowConfig) {
+    return (
+      <Card title="Validation" description="Shadow prediction vs the live configuration" icon={Activity}>
+        <EmptyState
+          icon={FlaskConical}
+          title="No shadow config for this zone"
+          body="Run the what-if engine for this zone and send the recommendation to shadow, or set setpoints manually below."
+          action={
+            <Link to="/optimize" className={buttonStyles("primary", "sm")}>
+              <FlaskConical className="h-3.5 w-3.5" aria-hidden /> Open what-if engine
+            </Link>
+          }
+        />
+      </Card>
+    );
+  }
 
-  // --- Summary metrics ---
-  const feasibleRate = data.feasibleRate;
-  const meetsRate = data.meetsRate;
-  const avgPueGap = data.avgPueGap;
-  const budgetOkTotal = data.total ? `${data.budgetOk} / ${data.total}` : "—";
-  const avgWueGap = data.total
-    ? data.samples.reduce((s, x) => s + (x.predictedWue - zone.targets.wue), 0) / data.total
-    : 0;
-  const pueSeries = data.samples.map((s) => s.actualPue);
-  const wueSeries = data.samples.map((s) => s.actualWue);
-
-  const rows = showAll ? data.samples.slice().reverse() : data.samples.slice(-4).reverse();
+  const labels = data.samples.map((s) => fmtTick(s.tick).slice(0, 5));
+  const rows = showAll ? data.samples.slice().reverse() : data.samples.slice(-5).reverse();
+  const { criteria } = data;
 
   return (
-    <Panel
-      title="1 — Virtual Simulation"
-      action={
-        <span className="flex items-center gap-1.5 text-xs font-normal normal-case text-slate-500">
-          <Info className="h-3.5 w-3.5" aria-hidden /> (Shadow mode)
-        </span>
-      }
+    <Card
+      title="Validation"
+      description={`Shadow config predicted against live telemetry · ${data.total} samples (7-day window)`}
+      icon={Activity}
+      action={<Badge tone={data.ready ? "ok" : "info"} dot>{data.ready ? "Passed" : "Collecting"}</Badge>}
     >
-      {/* Status row */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-800 pb-3 text-xs text-slate-400">
-        <StatusBadge tone={data.hasShadowConfig ? "good" : "warn"}>
-          {data.hasShadowConfig ? "Running" : "No config"}
-        </StatusBadge>
-        <span className="font-mono tabular-nums">{data.total} samples · 7-day window</span>
+      <div className="grid grid-cols-2 gap-4 rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line xl:grid-cols-4">
+        <Stat
+          label="Samples"
+          value={data.total}
+          sub={`min ${criteria.minSamples}`}
+          tone={data.total >= criteria.minSamples ? "ok" : undefined}
+        />
+        <Stat
+          label="Feasible"
+          value={pct(data.feasibleRate)}
+          sub={`need ≥ ${pct(criteria.feasibleRate)}`}
+          tone={data.feasibleRate >= criteria.feasibleRate ? "ok" : "warn"}
+        />
+        <Stat
+          label="On target"
+          value={pct(data.meetsRate)}
+          sub={`need ≥ ${pct(criteria.meetsRate)}`}
+          tone={data.meetsRate >= criteria.meetsRate ? "ok" : "warn"}
+        />
+        <Stat
+          label="PUE overshoot"
+          value={data.avgPueGap.toFixed(4)}
+          sub="avg above target"
+          tone={data.avgPueGap <= 0 ? "ok" : undefined}
+        />
       </div>
 
-      {!data.hasShadowConfig ? (
-        <p className="mt-4 text-sm text-slate-400">
-          No shadow config set for this zone. Run What-If on the Optimization page, use the best setpoints, then apply to shadow.
-        </p>
-      ) : (
-        <>
-          {/* PUE / WUE trend charts */}
-          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-slate-200">PUE — Current vs Target</p>
-                  <p className="text-[10px] uppercase tracking-wider text-slate-500">PUE</p>
-                </div>
-                <div className="flex gap-4 text-xs">
-                  <span>
-                    <span className="mr-1 text-slate-500">Current</span>
-                    <span className="font-mono text-cyan-300">{last ? last.actualPue.toFixed(3) : "—"}</span>
-                  </span>
-                  <span>
-                    <span className="mr-1 text-slate-500">Target</span>
-                    <span className="font-mono text-emerald-300">{zone.targets.pue.toFixed(3)}</span>
-                  </span>
-                </div>
+      <div className="mt-6 grid gap-6 xl:grid-cols-2">
+        {(
+          [
+            ["PUE", "predictedPue", "actualPue", zone.targets.pue, 4],
+            ["WUE", "predictedWue", "actualWue", zone.targets.wue, 3],
+          ] as const
+        ).map(([metric, predKey, actKey, target, digits]) => {
+          const last = data.samples[data.samples.length - 1];
+          return (
+            <div key={metric} className="min-w-0">
+              <div className="mb-2 flex items-baseline justify-between gap-3">
+                <p className="text-sm font-medium text-fg">{metric}</p>
+                <p className="text-xs tabular-nums text-fg-subtle">
+                  shadow <span className="font-mono text-accent">{last ? last[predKey].toFixed(digits) : "—"}</span> · live{" "}
+                  <span className="font-mono text-fg-muted">{last ? last[actKey].toFixed(digits) : "—"}</span>
+                </p>
               </div>
               <LineChart
-                ariaLabel="Actual PUE against the target over the validation window"
+                height={180}
+                ariaLabel={`${metric}: shadow prediction vs live configuration against target`}
                 labels={labels}
-                series={[{ label: "Actual PUE", color: CHART.cyan, values: pueSeries }]}
+                series={[
+                  { label: "Shadow", color: CHART.cyan, values: data.samples.map((s) => s[predKey]), area: true },
+                  { label: "Live", color: CHART.slate, values: data.samples.map((s) => s[actKey]), dashed: true },
+                ]}
+                thresholds={[{ value: target, label: `target ${target.toFixed(3)}`, color: "var(--ok)" }]}
                 yFormat={(v) => v.toFixed(3)}
-                threshold={{ value: zone.targets.pue, label: `target ${zone.targets.pue.toFixed(3)}`, color: "#34d399" }}
               />
             </div>
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-slate-200">WUE — Current vs Target (L/kWh)</p>
-                  <p className="text-[10px] uppercase tracking-wider text-slate-500">WUE</p>
-                </div>
-                <div className="flex gap-4 text-xs">
-                  <span>
-                    <span className="mr-1 text-slate-500">Current</span>
-                    <span className="font-mono text-cyan-300">{last ? last.actualWue.toFixed(3) : "—"}</span>
-                  </span>
-                  <span>
-                    <span className="mr-1 text-slate-500">Target</span>
-                    <span className="font-mono text-emerald-300">{zone.targets.wue.toFixed(3)}</span>
-                  </span>
-                </div>
-              </div>
-              <LineChart
-                ariaLabel="Actual WUE against the target over the validation window"
-                labels={labels}
-                series={[{ label: "Actual WUE", color: CHART.emerald, values: wueSeries }]}
-                yFormat={(v) => v.toFixed(3)}
-                threshold={{ value: zone.targets.wue, label: `target ${zone.targets.wue.toFixed(3)}`, color: "#34d399" }}
-              />
-            </div>
-          </div>
+          );
+        })}
+      </div>
 
-          {/* Summary metrics */}
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-              <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-cyan-300">
-                <Zap className="h-3.5 w-3.5" aria-hidden /> PUE
-              </p>
-              <div className="mt-2 grid grid-cols-3 gap-2 text-center">
-                <SummaryStat label="Feasible" value={`${Math.round(feasibleRate * 100)}%`} good />
-                <SummaryStat label="Meet target ±0.02" value={`${Math.round(meetsRate * 100)}%`} good={meetsRate >= 0.9} />
-                <SummaryStat label="Avg PUE gap" value={avgPueGap.toFixed(3)} good={avgPueGap <= 0} />
-              </div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-              <p className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-emerald-300">
-                <Droplets className="h-3.5 w-3.5" aria-hidden /> WUE
-              </p>
-              <div className="mt-2 grid grid-cols-3 gap-2 text-center">
-                <SummaryStat label="In budget" value={budgetOkTotal} good={data.total > 0 && data.budgetOk === data.total} />
-                <SummaryStat label="Avg WUE gap" value={`${avgWueGap.toFixed(3)} L/kWh`} good={avgWueGap <= 0} />
-                <SummaryStat
-                  label="Water budget"
-                  value={waterBudgetPct !== null ? `${Math.round(waterBudgetPct)}%` : "—"}
-                  good={waterBudgetPct !== null && waterBudgetPct <= 100}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Latest readings */}
-          <div className="mt-4">
-            <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-300">Latest readings</p>
-            <Table>
-              <thead>
-                <tr>
-                  <Th>Time</Th>
-                  <Th right>Pred PUE</Th>
-                  <Th right>Actual PUE</Th>
-                  <Th right>Pred WUE</Th>
-                  <Th right>Actual WUE</Th>
-                  <Th right>Chip</Th>
-                  <Th>Status</Th>
+      <div className="mt-6">
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-xs font-medium text-fg-subtle">Recent samples</p>
+          {data.samples.length > 5 ? (
+            <button
+              type="button"
+              onClick={() => setShowAll((v) => !v)}
+              className="text-xs text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              {showAll ? "Show fewer" : `Show all ${data.samples.length}`}
+            </button>
+          ) : null}
+        </div>
+        <div className={cx(showAll && "max-h-96 overflow-y-auto")}>
+          <Table minWidth={620}>
+            <thead>
+              <tr>
+                <Th>Sim time</Th>
+                <Th right>Shadow PUE</Th>
+                <Th right>Live PUE</Th>
+                <Th right>Shadow WUE</Th>
+                <Th right>Live WUE</Th>
+                <Th right>Chip</Th>
+                <Th>Result</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((s) => (
+                <tr key={s.tick}>
+                  <Td className="font-mono text-xs">{fmtTick(s.tick)}</Td>
+                  <Td right className="text-accent">{s.predictedPue.toFixed(4)}</Td>
+                  <Td right>{s.actualPue.toFixed(4)}</Td>
+                  <Td right className="text-accent">{s.predictedWue.toFixed(3)}</Td>
+                  <Td right>{s.actualWue.toFixed(3)}</Td>
+                  <Td right>{s.chipTempC.toFixed(1)}°C</Td>
+                  <Td>
+                    <span className="flex flex-wrap gap-1">
+                      <Badge tone={s.feasible ? "ok" : "crit"}>{s.feasible ? "feasible" : "violation"}</Badge>
+                      <Badge tone={s.meetsTarget ? "ok" : "warn"}>{s.meetsTarget ? "on target" : "off target"}</Badge>
+                    </span>
+                  </Td>
                 </tr>
-              </thead>
-              <tbody>
-                {rows.map((s) => (
-                  <tr key={s.tick} className="border-b border-slate-800/60">
-                    <Td className="font-mono text-xs">{fmtTick(s.tick)}</Td>
-                    <Td right className="text-xs text-sev-info">{s.predictedPue.toFixed(4)}</Td>
-                    <Td right className="text-xs">{s.actualPue.toFixed(4)}</Td>
-                    <Td right className="text-xs text-sev-ok">{s.predictedWue.toFixed(3)}</Td>
-                    <Td right className="text-xs">{s.actualWue.toFixed(3)}</Td>
-                    <Td right className="text-xs">{s.chipTempC.toFixed(1)}°C</Td>
-                    <Td className="text-xs">
-                      <StatusBadge tone={s.feasible ? "good" : "bad"}>{s.feasible ? "feasible" : "violation"}</StatusBadge>
-                      {s.meetsTarget ? (
-                        <span className="ml-1 text-sev-ok">· on target</span>
-                      ) : (
-                        <span className="ml-1 text-sev-warn">· off target</span>
-                      )}
-                    </Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-            <div className="mt-2 text-center">
-              <button
-                type="button"
-                onClick={() => setShowAll((v) => !v)}
-                className="text-xs text-cyan-300 hover:underline focus-visible:outline-2 focus-visible:outline-cyan-400"
-              >
-                {showAll ? "Collapse ↑" : "View full data ↓"}
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-    </Panel>
-  );
-}
-
-function SummaryStat({ label, value, good }: { label: string; value: string; good?: boolean }) {
-  return (
-    <div>
-      <p className="text-[10px] uppercase tracking-wider text-slate-500">{label}</p>
-      <p className={`mt-0.5 font-mono text-sm tabular-nums ${good ? "text-emerald-300" : "text-slate-200"}`}>{value}</p>
-    </div>
+              ))}
+            </tbody>
+          </Table>
+        </div>
+      </div>
+    </Card>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* Closed-loop (Real) — live engine status                              */
+/* Closed-loop gate                                                    */
 /* ------------------------------------------------------------------ */
 
-function LoopStat({ label, value, ok, icon }: { label: string; value: string; ok?: boolean; icon?: React.ReactNode }) {
+function Criterion({ ok, title, value }: { ok: boolean; title: string; value?: string }) {
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2">
-      <dt className="flex items-center gap-1.5 text-xs text-slate-400">
-        {icon}
-        {label}
-      </dt>
-      <dd className={`mt-0.5 font-mono text-base tabular-nums ${ok === undefined ? "text-slate-100" : ok ? "text-emerald-300" : "text-red-300"}`}>
-        {value}
-        {ok !== undefined ? <span className="ml-1.5 text-xs">{ok ? "in bounds" : "OUT"}</span> : null}
-      </dd>
-    </div>
+    <li className="flex items-center gap-3 py-2.5">
+      <span
+        className={cx(
+          "flex h-5 w-5 shrink-0 items-center justify-center rounded-full ring-1 ring-inset",
+          ok ? "bg-ok/15 text-ok ring-ok/30" : "bg-surface-3 text-fg-faint ring-line-strong",
+        )}
+      >
+        {ok ? <Check className="h-3 w-3" aria-hidden /> : <X className="h-3 w-3" aria-hidden />}
+      </span>
+      <span className={cx("flex-1 text-sm", ok ? "text-fg" : "text-fg-subtle")}>{title}</span>
+      {value ? <span className={cx("font-mono text-xs tabular-nums", ok ? "text-ok" : "text-fg-subtle")}>{value}</span> : null}
+    </li>
   );
 }
 
-function RealEnginePanel({ zone }: { zone: ControlZoneView }) {
+function GateCard({
+  zone,
+  validation,
+  onModeChange,
+}: {
+  zone: ControlZoneView;
+  validation: ValidationResponse | null;
+  onModeChange: (res: ControlResponse) => void;
+}) {
+  const toast = useToast();
+  const [confirm, setConfirm] = useState<"closed_loop" | "shadow" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const closed = zone.mode === "closed_loop";
+  const v = validation;
+  const commsOk = zone.commsOk && !zone.failSafeActive;
+  const checks = v
+    ? [
+        { ok: v.hasShadowConfig, title: "Shadow config set" },
+        { ok: v.total >= v.criteria.minSamples, title: "Enough samples", value: `${v.total}/${v.criteria.minSamples}` },
+        { ok: v.feasibleRate >= v.criteria.feasibleRate, title: "Inside guardrails", value: pct(v.feasibleRate) },
+        { ok: v.meetsRate >= v.criteria.meetsRate, title: `On target (±${v.criteria.tolerance})`, value: pct(v.meetsRate) },
+        { ok: commsOk, title: "Comms & watchdog healthy" },
+      ]
+    : [];
+  const passed = checks.filter((c) => c.ok).length;
+  const ready = v != null && v.ready && commsOk;
+
+  const switchMode = async (mode: "closed_loop" | "shadow") => {
+    setBusy(true);
+    try {
+      const res = await api.setControlMode(zone.id, mode);
+      onModeChange(res);
+      toast(
+        mode === "closed_loop"
+          ? `${zone.name} is now in closed-loop control.`
+          : `${zone.name} returned to shadow mode — no further writeback.`,
+        "success",
+      );
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Mode change failed.", "error");
+    } finally {
+      setBusy(false);
+      setConfirm(null);
+    }
+  };
+
+  const ringPct = checks.length ? passed / checks.length : 0;
+  const R = 26;
+  const C = 2 * Math.PI * R;
+
+  return (
+    <Card title="Closed-loop gate" description="All checks must pass before writeback" icon={ListChecks}>
+      <div className="flex items-center gap-4">
+        <svg width="64" height="64" viewBox="0 0 64 64" className="shrink-0 -rotate-90" aria-hidden>
+          <circle cx="32" cy="32" r={R} fill="none" stroke="var(--surface-3)" strokeWidth="6" />
+          <circle
+            cx="32"
+            cy="32"
+            r={R}
+            fill="none"
+            stroke={closed || ready ? "var(--ok)" : "var(--accent)"}
+            strokeWidth="6"
+            strokeLinecap="round"
+            strokeDasharray={`${C * ringPct} ${C}`}
+            className="transition-[stroke-dasharray] duration-500"
+          />
+        </svg>
+        <div>
+          <p className={cx("text-lg font-semibold", closed ? TONE_TEXT.ok : ready ? TONE_TEXT.ok : "text-fg")}>
+            {closed ? "Closed-loop active" : ready ? "Ready to promote" : `${passed} of ${checks.length || 5} checks`}
+          </p>
+          <p className="text-xs text-fg-subtle">
+            {closed
+              ? "The engine writes slew-limited setpoints every tick."
+              : ready
+                ? "Validated on live telemetry."
+                : "Validation keeps sampling every tick."}
+          </p>
+        </div>
+      </div>
+
+      <ul className="mt-4 divide-y divide-line border-y border-line">
+        {checks.map((c) => (
+          <Criterion key={c.title} {...c} />
+        ))}
+      </ul>
+
+      <div className="mt-4">
+        {closed ? (
+          <Button variant="secondary" className="w-full" onClick={() => setConfirm("shadow")} disabled={busy}>
+            <Undo2 className="h-4 w-4" aria-hidden /> Return to shadow
+          </Button>
+        ) : (
+          <Button variant="primary" className="w-full" onClick={() => setConfirm("closed_loop")} disabled={!ready || busy}>
+            <Power className="h-4 w-4" aria-hidden /> Enable closed-loop
+          </Button>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm === "closed_loop" ? `Enable closed-loop on ${zone.name}?` : `Return ${zone.name} to shadow?`}
+        body={
+          confirm === "closed_loop"
+            ? "The validated shadow config becomes the real config (slew-limited), and the engine starts steering this zone toward its PUE/WUE targets every tick. Guardrails and the watchdog stay armed."
+            : "The engine stops writing setpoints. Current setpoints are kept; future changes are logged as would-be actions only."
+        }
+        confirmLabel={confirm === "closed_loop" ? "Enable closed-loop" : "Return to shadow"}
+        tone={confirm === "closed_loop" ? "warn" : "primary"}
+        busy={busy}
+        onConfirm={() => confirm && void switchMode(confirm)}
+        onCancel={() => setConfirm(null)}
+      />
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Live engine status                                                  */
+/* ------------------------------------------------------------------ */
+
+function EngineCard({ zone }: { zone: ControlZoneView }) {
   const { data: live } = useSim();
   const liveZone = useMemo(() => live?.zones.find((z) => z.id === zone.id), [live, zone.id]);
-
-  const sp = zone.effectiveSetpoints;
   const t = liveZone?.telemetry;
   const p = liveZone?.prediction;
+  const inRange = (v: number, lo: number, hi: number) => v >= lo && v <= hi;
+
+  const readings: { label: string; value: string; ok?: boolean }[] = [
+    { label: "Supply", value: t ? `${t.cduSupplyC.toFixed(1)}°C` : "—" },
+    { label: "Return", value: t ? `${t.cduReturnC.toFixed(1)}°C` : "—" },
+    { label: "ΔP", value: p ? `${p.deltaPKpa.toFixed(0)} kPa` : "—", ok: p ? inRange(p.deltaPKpa, GUARDRAILS.deltaPMinKpa, GUARDRAILS.deltaPMaxKpa) : undefined },
+    { label: "Flow", value: p ? `${p.flowLpm} L/min` : "—", ok: p ? inRange(p.flowLpm, GUARDRAILS.flowMinLpm, GUARDRAILS.flowMaxLpm) : undefined },
+    { label: "Chip", value: p ? `${p.chipTempC.toFixed(1)}°C` : "—", ok: p ? p.chipTempC <= GUARDRAILS.chipTempMaxC : undefined },
+    { label: "Margin", value: p ? `${p.thermalMarginC.toFixed(1)}°C` : "—", ok: p ? p.thermalMarginC >= MARGIN_TIERS.green : undefined },
+  ];
 
   return (
-    <Panel
-      id="real-engine"
-      title="1 — Closed-loop"
+    <Card
+      title="Live engine"
+      description={zone.mode === "closed_loop" ? "Closed-loop · writing setpoints" : "Shadow · read-only"}
+      icon={HeartPulse}
       action={
-        <span className="flex items-center gap-1.5 text-xs font-normal normal-case text-slate-500">
-          <Info className="h-3.5 w-3.5" aria-hidden /> (Real engine)
-        </span>
+        zone.failSafeActive ? (
+          <Badge tone="crit" dot>
+            Fail-safe
+          </Badge>
+        ) : (
+          <Badge tone={zone.commsOk ? "ok" : "warn"} dot>
+            {zone.commsOk ? "Comms OK" : "Comms lost"}
+          </Badge>
+        )
       }
     >
-      {/* Operating status */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-800 pb-3 text-xs text-slate-400">
-        <StatusBadge tone={zone.mode === "closed_loop" ? "good" : "info"}>
-          {zone.mode === "closed_loop" ? "Closed-loop (Phase B)" : "Shadow (Phase A)"}
-        </StatusBadge>
-        <span className="flex items-center gap-1.5">
-          <HeartPulse className={`h-3.5 w-3.5 ${zone.failSafeActive ? "text-red-400" : "text-emerald-400"}`} aria-hidden />
-          {zone.failSafeActive ? (
-            <span className="font-medium text-red-300">FAIL-SAFE ACTIVE</span>
-          ) : (
-            <span className="text-emerald-300">{zone.commsOk ? "Comms OK" : "Comms lost"}</span>
-          )}
-        </span>
-        <span className="font-mono tabular-nums">
-          Heartbeat {zone.heartbeatAgeSec !== null ? `${zone.heartbeatAgeSec}s ago` : "never"} · fail-safe at {zone.watchdogTimeoutSec}s
-        </span>
-      </div>
-
-      {/* Live telemetry */}
-      <dl className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
-        <LoopStat label="Supply" value={t ? `${t.cduSupplyC.toFixed(1)}°C` : "—"} />
-        <LoopStat label="Return" value={t ? `${t.cduReturnC.toFixed(1)}°C` : "—"} />
-        <LoopStat
-          label="ΔP"
-          value={p ? `${p.deltaPKpa.toFixed(0)} kPa` : "—"}
-          ok={p ? p.deltaPKpa >= GUARDRAILS.deltaPMinKpa && p.deltaPKpa <= GUARDRAILS.deltaPMaxKpa : undefined}
-        />
-        <LoopStat
-          label="Flow"
-          value={p ? `${p.flowLpm} L/min` : "—"}
-          ok={p ? p.flowLpm >= GUARDRAILS.flowMinLpm && p.flowLpm <= GUARDRAILS.flowMaxLpm : undefined}
-        />
-        <LoopStat label="Chip temp" value={p ? `${p.chipTempC.toFixed(1)}°C` : "—"} />
-        <LoopStat label="Margin" value={p ? `${p.thermalMarginC.toFixed(1)}°C` : "—"} ok={p ? p.thermalMarginC >= 5 : undefined} />
-      </dl>
-
-      {/* Effective setpoints being applied */}
-      <p className="mt-4 text-xs text-slate-400">
-        Applying setpoints: supply <span className="font-mono text-slate-200">{sp.coolantSupplyC}°C</span> · pump{" "}
-        <span className="font-mono text-slate-200">{sp.pumpSpeedPct}%</span> · valve{" "}
-        <span className="font-mono text-slate-200">{sp.valvePosPct}%</span> · CDU{" "}
-        <span className="font-mono text-slate-200">{sp.cduSetpointC}°C</span>
+      <p className="text-xs text-fg-subtle">
+        Heartbeat {zone.heartbeatAgeSec !== null ? `${zone.heartbeatAgeSec}s ago` : "never"} · fail-safe after {zone.watchdogTimeoutSec}s
       </p>
-    </Panel>
+      <dl className="mt-3 grid grid-cols-3 gap-2">
+        {readings.map((r) => (
+          <div key={r.label} className="rounded-lg bg-surface-2/60 px-2.5 py-2 ring-1 ring-inset ring-line">
+            <dt className="flex items-center justify-between text-[11px] text-fg-faint">
+              {r.label}
+              {r.ok !== undefined ? (
+                <span className={cx("h-1.5 w-1.5 rounded-full", r.ok ? "bg-ok" : "bg-crit")} aria-label={r.ok ? "in bounds" : "out of bounds"} />
+              ) : null}
+            </dt>
+            <dd className="mt-0.5 truncate text-sm font-medium tabular-nums text-fg">{r.value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-4 text-[11px] text-fg-faint">Effective setpoints{zone.failSafeActive ? " (factory, fail-safe)" : ""}</p>
+      <SetpointChips sp={zone.effectiveSetpoints} className="mt-1.5" />
+      {zone.slewLimited ? <p className="mt-2 text-[11px] text-warn">Last change was clamped by the slew-rate limiter.</p> : null}
+    </Card>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* Setpoint control — Auto (what-if target) / Manual (editable)         */
+/* Setpoint control                                                    */
 /* ------------------------------------------------------------------ */
 
 const SETPOINT_DEFS = [
-  { key: "coolantSupplyC", label: "Coolant Supply Temp", unit: "°C", min: 16, max: 34, step: 0.5, rate: (s: ControlZoneView) => `${s.slewLimits.maxTempStepC} °C / step` },
-  { key: "pumpSpeedPct", label: "Pump Speed", unit: "%", min: 40, max: 100, step: 1, rate: (s: ControlZoneView) => `${s.slewLimits.maxPumpStepPct} % / step` },
-  { key: "valvePosPct", label: "Bypass Valve Position", unit: "%", min: 30, max: 100, step: 1, rate: (s: ControlZoneView) => `${s.slewLimits.maxValveStepPct} % / step` },
-  { key: "cduSetpointC", label: "CDU Supply Temp", unit: "°C", min: 16, max: 34, step: 0.5, rate: (s: ControlZoneView) => `${s.slewLimits.maxTempStepC} °C / step` },
+  { key: "coolantSupplyC", label: "Coolant supply", unit: "°C", min: 16, max: 34, step: 0.5, rate: (s: ControlZoneView) => `±${s.slewLimits.maxTempStepC}°C / step` },
+  { key: "pumpSpeedPct", label: "Pump speed", unit: "%", min: 40, max: 100, step: 1, rate: (s: ControlZoneView) => `±${s.slewLimits.maxPumpStepPct}% / step` },
+  { key: "valvePosPct", label: "Bypass valve", unit: "%", min: 30, max: 100, step: 1, rate: (s: ControlZoneView) => `±${s.slewLimits.maxValveStepPct}% / step` },
+  { key: "cduSetpointC", label: "CDU supply", unit: "°C", min: 16, max: 34, step: 0.5, rate: (s: ControlZoneView) => `±${s.slewLimits.maxTempStepC}°C / step` },
 ] as const;
-
-function SetpointCard({
-  label,
-  unit,
-  current,
-  target,
-  min,
-  max,
-  step,
-  rate,
-  editable,
-  status,
-  onChange,
-}: {
-  label: string;
-  unit: string;
-  current: number;
-  target: number;
-  min: number;
-  max: number;
-  step: number;
-  rate: string;
-  editable: boolean;
-  status: "Tracking" | "Manual" | "Idle";
-  onChange: (v: number) => void;
-}) {
-  const pct = (v: number) => `${(clamp01((v - min) / (max - min)) * 100).toFixed(1)}%`;
-  return (
-    <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-medium uppercase tracking-wider text-slate-400">{label}</p>
-        <StatusBadge tone={status === "Tracking" ? "good" : status === "Manual" ? "info" : "muted"}>{status}</StatusBadge>
-      </div>
-      <div className="mt-2 flex items-baseline gap-4 text-sm">
-        <span>
-          <span className="mr-1 text-[10px] uppercase text-slate-500">Current</span>
-          <span className="font-mono tabular-nums text-cyan-300">
-            {current.toFixed(1)}
-            <span className="ml-0.5 text-xs text-slate-500">{unit}</span>
-          </span>
-        </span>
-        <span>
-          <span className="mr-1 text-[10px] uppercase text-slate-500">Target</span>
-          <span className="font-mono tabular-nums text-slate-200">
-            {target.toFixed(1)}
-            <span className="ml-0.5 text-xs text-slate-500">{unit}</span>
-          </span>
-        </span>
-      </div>
-      {editable ? (
-        <div className="relative mt-3">
-          <input
-            type="range"
-            min={min}
-            max={max}
-            step={step}
-            value={target}
-            onChange={(e) => onChange(Number(e.target.value))}
-            aria-label={`${label} target`}
-            className="w-full accent-emerald-400 focus-visible:outline-2 focus-visible:outline-cyan-400"
-          />
-          <span
-            className="pointer-events-none absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 -translate-x-1/2 rounded-full bg-cyan-400 ring-2 ring-slate-900"
-            style={{ left: `calc(${pct(current)} * (100% - 1rem) + 0.5rem)` }}
-            title={`current ${current.toFixed(1)}`}
-            aria-hidden
-          />
-        </div>
-      ) : (
-        <div className="relative mt-3 h-1.5 rounded-full bg-slate-800">
-          <span
-            className="absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 -translate-x-1/2 rounded-full bg-emerald-400 ring-2 ring-slate-900"
-            style={{ left: pct(target) }}
-            title={`target ${target.toFixed(1)}`}
-            aria-hidden
-          />
-          <span
-            className="absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 -translate-x-1/2 rounded-full bg-cyan-400 ring-2 ring-slate-900"
-            style={{ left: pct(current) }}
-            title={`current ${current.toFixed(1)}`}
-            aria-hidden
-          />
-        </div>
-      )}
-      <div className="mt-1 flex justify-between font-mono text-[10px] text-slate-500">
-        <span>{min.toFixed(0)}</span>
-        <span>{max.toFixed(0)}</span>
-      </div>
-      <p className="mt-2 text-[10px] text-slate-500">
-        Rate limit <span className="font-mono text-slate-400">{rate}</span>
-      </p>
-    </div>
-  );
-}
 
 function SetpointControl({ zone, onApplied }: { zone: ControlZoneView; onApplied: () => void }) {
   const toast = useToast();
@@ -422,12 +432,10 @@ function SetpointControl({ zone, onApplied }: { zone: ControlZoneView; onApplied
   const [draft, setDraft] = useState<Setpoints>(zone.shadowSetpoints ?? zone.currentSetpoints);
   const [applying, setApplying] = useState(false);
 
-  // Seed the draft + reset to Auto only on a real change: a different zone, or a
-  // genuinely new what-if recommendation (shadowSetpoints value change). The
-  // control state is polled every 5s, so depending on the raw object refs here
-  // would reset the mode back to Auto and wipe manual edits.
+  // Re-seed only on a real change (another zone, or a new shadow config). The
+  // control state is polled every 5s; depending on object refs here would wipe
+  // manual edits and flip the mode back to Auto.
   const shadowKey = JSON.stringify(zone.shadowSetpoints ?? null);
-
   useEffect(() => {
     setDraft(zone.shadowSetpoints ?? zone.currentSetpoints);
     setMode("auto");
@@ -435,21 +443,19 @@ function SetpointControl({ zone, onApplied }: { zone: ControlZoneView; onApplied
   }, [zone.id, shadowKey]);
 
   const editable = mode === "manual";
-  const tracking = zone.shadowSetpoints != null;
+  const closed = zone.mode === "closed_loop";
 
   const apply = async () => {
     setApplying(true);
     try {
-      if (zone.mode === "shadow") {
+      if (!closed) {
         await api.applyShadow(zone.id, draft);
-        toast("Applied to shadow — validating.", "success");
+        toast("Shadow config updated — validation restarted.", "success");
       } else {
         const res = await api.applySetpoints(zone.id, draft, "Manual setpoint change");
-        toast(
-          res.kind === "applied" ? `Applied.${res.slewLimited ? " Slew-rate limit clamped the jump." : ""}` : "Shadow mode: would-be action logged.",
-          res.kind === "applied" ? "success" : "info",
-        );
+        toast(`Setpoints written.${res.slewLimited ? " The slew-rate limiter clamped the jump." : ""}`, "success");
       }
+      setMode("auto");
       onApplied();
     } catch (e) {
       toast(e instanceof Error ? e.message : "Apply failed.", "error");
@@ -459,117 +465,137 @@ function SetpointControl({ zone, onApplied }: { zone: ControlZoneView; onApplied
   };
 
   return (
-    <Panel
-      title="2 — Setpoint Control"
+    <Card
+      title="Setpoint control"
+      description={
+        closed
+          ? "Manual writes go to the controllers through the slew limiter."
+          : "Auto tracks the shadow config. Manual edits replace it and restart validation."
+      }
+      icon={SlidersHorizontal}
       action={
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 text-xs font-normal normal-case text-slate-500">
-            <Info className="h-3.5 w-3.5" aria-hidden /> (Slew limited)
-          </span>
-          <div className="flex items-center gap-1" role="tablist" aria-label="Control mode">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === "auto"}
-              onClick={() => setMode("auto")}
-              className={`rounded-md border px-2 py-0.5 text-xs font-medium focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-                mode === "auto"
-                  ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200"
-                  : "border-slate-700 text-slate-400 hover:bg-slate-800"
-              }`}
-            >
-              Auto (Recommended)
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === "manual"}
-              onClick={() => setMode("manual")}
-              className={`rounded-md border px-2 py-0.5 text-xs font-medium focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-                mode === "manual"
-                  ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200"
-                  : "border-slate-700 text-slate-400 hover:bg-slate-800"
-              }`}
-            >
-              Manual
-            </button>
-          </div>
-        </div>
+        <Segmented
+          ariaLabel="Control mode"
+          size="sm"
+          value={mode}
+          onChange={setMode}
+          options={[
+            { value: "auto", label: "Auto" },
+            { value: "manual", label: "Manual" },
+          ]}
+        />
       }
     >
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {SETPOINT_DEFS.map((d) => (
-          <SetpointCard
-            key={d.key}
-            label={d.label}
-            unit={d.unit}
-            current={zone.currentSetpoints[d.key]}
-            target={draft[d.key]}
-            min={d.min}
-            max={d.max}
-            step={d.step}
-            rate={d.rate(zone)}
-            editable={editable}
-            status={editable ? "Manual" : tracking ? "Tracking" : "Idle"}
-            onChange={(v) => setDraft((prev) => ({ ...prev, [d.key]: v }))}
-          />
-        ))}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {SETPOINT_DEFS.map((d) => {
+          const current = zone.currentSetpoints[d.key];
+          const target = draft[d.key];
+          const changed = Math.abs(target - current) > 1e-9;
+          return (
+            <div key={d.key} className="rounded-xl bg-surface-2/60 p-4 ring-1 ring-inset ring-line">
+              <p className="text-xs font-medium text-fg-muted">{d.label}</p>
+              <div className="mt-2 flex items-baseline gap-2">
+                <span className="text-xl font-semibold tabular-nums text-fg">
+                  {target.toFixed(d.step < 1 ? 1 : 0)}
+                  <span className="ml-0.5 text-xs font-normal text-fg-subtle">{d.unit}</span>
+                </span>
+                {changed ? (
+                  <span className="text-xs tabular-nums text-fg-faint">
+                    from {current.toFixed(d.step < 1 ? 1 : 0)}
+                    {d.unit}
+                  </span>
+                ) : (
+                  <span className="text-xs text-fg-faint">current</span>
+                )}
+              </div>
+              <div className="mt-3">
+                <Slider
+                  value={target}
+                  min={d.min}
+                  max={d.max}
+                  step={d.step}
+                  disabled={!editable}
+                  tone={editable ? "accent" : "neutral"}
+                  ariaLabel={`${d.label} target`}
+                  onChange={(v) => setDraft((prev) => ({ ...prev, [d.key]: v }))}
+                />
+              </div>
+              <div className="mt-1 flex justify-between gap-2 font-mono text-[10px] text-fg-faint">
+                <span>{d.min}</span>
+                <span className="font-sans">{d.rate(zone)}</span>
+                <span>{d.max}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
-      {editable ? (
-        <div className="mt-4 flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => void apply()}
-            disabled={applying}
-            className="inline-flex items-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400 focus-visible:outline-2 focus-visible:outline-cyan-300 disabled:opacity-50"
-          >
-            {applying ? "Applying…" : "Apply setpoints"}
-          </button>
-          <p className="text-xs text-slate-400">
-            Slew-rate limits and guardrails still apply. Validation re-runs after a manual change.
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        {editable ? (
+          <>
+            <Button variant="primary" onClick={() => void apply()} disabled={applying}>
+              {applying ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+              {closed ? "Write setpoints" : "Apply to shadow"}
+            </Button>
+            <Button variant="ghost" onClick={() => setDraft(zone.shadowSetpoints ?? zone.currentSetpoints)}>
+              Reset
+            </Button>
+            <p className="text-xs text-fg-subtle">Guardrails and budgets are re-checked server-side.</p>
+          </>
+        ) : (
+          <p className="text-xs text-fg-subtle">
+            {zone.shadowSetpoints
+              ? "Showing the shadow config as target. Switch to Manual to edit."
+              : "No shadow config yet — switch to Manual to set one."}
           </p>
-        </div>
-      ) : null}
-      <div className="mt-3 flex items-center gap-4 text-[10px] text-slate-500">
-        <span className="flex items-center gap-1.5">
-          <span className="h-2 w-2 rounded-full bg-cyan-400" aria-hidden /> Current
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="h-2 w-2 rounded-full bg-emerald-400" aria-hidden /> Target
-        </span>
-        <span className="flex items-center gap-1.5">Dotted line = auto trajectory (slew limited)</span>
+        )}
       </div>
-    </Panel>
+    </Card>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* Validation gate                                                     */
+/* Control log                                                         */
 /* ------------------------------------------------------------------ */
 
-function Criteria({ ok, title, desc }: { ok: boolean; title: string; desc: string }) {
+function ControlLog({ zone, actions }: { zone: ControlZoneView; actions: ControlResponse["actions"] }) {
+  const rows = actions.filter((a) => a.clusterId === zone.id).slice(0, 8);
   return (
-    <div className="flex items-start gap-2.5 rounded-xl border border-slate-700/60 bg-slate-900/50 p-3">
-      <CheckCircle2 className={`mt-0.5 h-4 w-4 shrink-0 ${ok ? "text-emerald-400" : "text-slate-600"}`} aria-hidden />
-      <div>
-        <p className="text-sm font-medium text-slate-200">{title}</p>
-        <p className="text-xs text-slate-400">{desc}</p>
-      </div>
-    </div>
+    <Card title="Control log" description={`Recent actions for ${zone.name}`} icon={ScrollText}>
+      {rows.length === 0 ? (
+        <p className="text-sm text-fg-subtle">No control actions recorded for this zone yet.</p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {rows.map((a) => (
+            <li key={a.id} className="py-3 first:pt-0 last:pb-0">
+              <div className="flex items-center justify-between gap-3">
+                <KindBadge kind={a.kind} />
+                <span className="text-xs tabular-nums text-fg-faint">{fmtDateTime(a.createdAt)}</span>
+              </div>
+              <p className="mt-1.5 text-sm text-fg-muted">{a.note || "—"}</p>
+              <SetpointChips sp={a.setpoints} className="mt-2" />
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* Page                                                                */
+/* ------------------------------------------------------------------ */
 
 function ShadowPage() {
   const navigate = useNavigate();
   const { zone: zoneId } = useSearch({ from: "/shadow" });
   const [control, setControl] = useState<ControlResponse | null>(null);
-  const [view, setView] = useState<"virtual" | "real">("virtual");
+  const { data: validation, reload: reloadValidation } = useValidation(zoneId);
 
   const refresh = useCallback(async () => {
     try {
       setControl(await api.getControl());
     } catch {
-      /* ignore */
+      /* keep last good data */
     }
   }, []);
 
@@ -579,115 +605,88 @@ function ShadowPage() {
     return () => clearInterval(id);
   }, [refresh]);
 
-  const zone: ControlZoneView | undefined = control?.zones.find((z) => z.id === zoneId);
+  const zone = control?.zones.find((z) => z.id === zoneId);
+  const hasConfig = zone?.shadowSetpoints != null;
+  const ready = validation?.ready ?? false;
+  const closed = zone?.mode === "closed_loop";
 
-  const steps: { label: string; state: "done" | "active" | "pending" }[] = zone
-    ? [
-        { label: "Analyze", state: "done" },
-        { label: "Shadow", state: zone.shadowSetpoints ? "done" : "active" },
-        { label: "Validate", state: zone.shadowSetpoints ? "active" : "pending" },
-        { label: "Closed-loop", state: zone.mode === "closed_loop" ? "done" : "pending" },
-      ]
-    : [];
-
-  const validated = zone != null && zone.shadowSetpoints != null;
+  const steps: { label: string; detail?: string; state: "done" | "active" | "pending" }[] = [
+    { label: "Analyze", detail: "What-if recommendation", state: hasConfig || closed ? "done" : "active" },
+    { label: "Shadow config", detail: hasConfig ? "Tracking live telemetry" : "Not set", state: hasConfig || closed ? "done" : "pending" },
+    {
+      label: "Validate",
+      detail: validation && hasConfig ? `${validation.total}/${validation.criteria.minSamples}+ samples` : undefined,
+      state: ready || closed ? "done" : hasConfig ? "active" : "pending",
+    },
+    { label: "Closed-loop", detail: closed ? "Active" : undefined, state: closed ? "done" : ready ? "active" : "pending" },
+  ];
 
   return (
-    <div className="space-y-4">
-      {/* Page header */}
-      <div>
-        <h1 className="text-xl font-semibold">Shadow Validation</h1>
-        <p className="text-sm text-slate-400">Validate a recommended scenario before enabling closed-loop control</p>
-      </div>
+    <div className="animate-fade-up space-y-6">
+      <PageHeader
+        title="Shadow validation"
+        description="Prove a recommendation on live telemetry before it controls real equipment."
+        actions={
+          control ? (
+            <Segmented
+              ariaLabel="Zone"
+              size="sm"
+              value={zoneId}
+              onChange={(id) => navigate({ to: "/shadow", search: { zone: id }, replace: true })}
+              options={control.zones.map((z) => ({
+                value: z.id,
+                label: (
+                  <span className="flex items-center gap-1.5">
+                    {z.mode === "closed_loop" ? <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-label="closed-loop" /> : null}
+                    {z.name}
+                  </span>
+                ),
+              }))}
+            />
+          ) : null
+        }
+      />
 
-      {/* Workflow stepper */}
-      {steps.length ? <Stepper steps={steps} /> : null}
-
-      {/* Zone selector + simulation mode */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div role="tablist" aria-label="Zones" className="flex flex-wrap gap-2">
-          {(control?.zones ?? []).map((z) => (
-            <button
-              key={z.id}
-              type="button"
-              role="tab"
-              aria-selected={zoneId === z.id}
-              onClick={() => navigate({ to: "/shadow", search: { zone: z.id }, replace: true })}
-              className={`rounded-lg border px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-                zoneId === z.id ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"
-              }`}
-            >
-              {z.name}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1" role="tablist" aria-label="Simulation mode">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "virtual"}
-            onClick={() => setView("virtual")}
-            className={`rounded-lg border px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-              view === "virtual" ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"
-            }`}
-          >
-            Virtual Simulation
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "real"}
-            onClick={() => setView("real")}
-            className={`rounded-lg border px-3 py-1.5 text-sm focus-visible:outline-2 focus-visible:outline-cyan-400 ${
-              view === "real" ? "border-cyan-400/60 bg-cyan-500/15 text-cyan-200" : "border-slate-700 text-slate-300 hover:bg-slate-800"
-            }`}
-          >
-            Closed-loop (Real)
-          </button>
-        </div>
-      </div>
-
-      {/* 1 — Virtual simulation OR real engine */}
-      {zone ? view === "virtual" ? <ValidationPanel zone={zone} /> : <RealEnginePanel zone={zone} /> : null}
-
-      {/* 2 — Setpoint control (auto from what-if, manual editable) */}
-      {zone ? <SetpointControl zone={zone} onApplied={() => void refresh()} /> : null}
-
-      {/* Validation gate — only in Virtual Simulation view */}
-      {zone && view === "virtual" ? (
-        <Panel
-          title="Validation Gate"
-          action={<StatusBadge tone={validated ? "good" : "warn"}>{validated ? "Passed" : "Pending"}</StatusBadge>}
-        >
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-slate-400">
-              Validation ensures the scenario is safe and effective before enabling closed-loop.
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                setView("real");
-                document.getElementById("real-engine")?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-              disabled={!validated}
-              className="rounded-lg border border-cyan-500/50 px-3 py-1.5 text-sm font-medium text-cyan-300 hover:bg-cyan-500/10 focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:opacity-40"
-            >
-              Proceed to Closed-loop
-            </button>
+      {!zone ? (
+        <div className="space-y-4">
+          <Skeleton className="h-16" />
+          <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
+            <Skeleton className="h-96" />
+            <Skeleton className="h-96" />
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Criteria ok={validated} title="PUE Target" desc="Within ±0.02" />
-            <Criteria ok={validated} title="WUE Target" desc="Within budget" />
-            <Criteria ok={zone.commsOk} title="System Constraints" desc="All within limits" />
-            <Criteria ok={validated && !zone.slewLimited} title="Stability" desc="No oscillation detected" />
-          </div>
-        </Panel>
-      ) : null}
+        </div>
+      ) : (
+        <>
+          <Card>
+            <Stepper steps={steps} />
+          </Card>
 
-      {/* Safety footer */}
-      <p className="py-2 text-center text-xs text-slate-500">
-        All simulations respect guardrails, capacity limits, and slew-rate constraints.
-      </p>
+          <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="min-w-0 space-y-6">
+              <ValidationCard zone={zone} data={validation} />
+              <SetpointControl
+                zone={zone}
+                onApplied={() => {
+                  void refresh();
+                  void reloadValidation();
+                }}
+              />
+              <ControlLog zone={zone} actions={control?.actions ?? []} />
+            </div>
+            <div className="space-y-6 lg:sticky lg:top-20">
+              <GateCard
+                zone={zone}
+                validation={validation}
+                onModeChange={(res) => {
+                  setControl(res);
+                  void reloadValidation();
+                }}
+              />
+              <EngineCard zone={zone} />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import type {
   WhatIfCandidate,
   ZoneView,
 } from "./twin/types";
+import type { SensorReading } from "./twin/sensors";
 import type { TransferProposal } from "./twin/transfer";
 
 export interface TelemetryCurrentResponse {
@@ -104,6 +105,7 @@ export interface ValidationResponse {
   meetsRate: number;
   avgPueGap: number;
   ready: boolean;
+  criteria: { minSamples: number; feasibleRate: number; meetsRate: number; tolerance: number };
   samples: {
     tick: number;
     predictedPue: number;
@@ -155,6 +157,11 @@ export interface ModelMetricsResponse {
     drift: { metric: string; warnThreshold: number; criticalThreshold: number };
   };
   drift: { t: string; kl: number }[];
+}
+
+export interface SensorsResponse {
+  windowTicks: number;
+  zones: { zoneId: number; name: string; ticks: number[]; sensors: SensorReading[] }[];
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -233,9 +240,10 @@ export const api = {
   }) => request<TransferResponse>("/api/transfers", { method: "POST", body: JSON.stringify(input) }),
   listTransfers: () => request<{ transfers: TransferListItem[] }>("/api/transfers"),
   transitionTransfer: (id: number, action: "virtual" | "verify" | "apply" | "reject") =>
-    request<{ ok: boolean; status: string }>(`/api/transfers/${id}/${action}`, {
+    request<{ ok: boolean; status: string; slewLimited: boolean }>(`/api/transfers/${id}/${action}`, {
       method: "POST",
       body: "{}",
     }),
   modelMetrics: () => request<ModelMetricsResponse>("/api/model/metrics"),
+  sensors: (windowTicks = 36) => request<SensorsResponse>(`/api/sensors?window=${windowTicks}`),
 };

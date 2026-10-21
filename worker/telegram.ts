@@ -1,7 +1,7 @@
 import { eq, inArray } from "drizzle-orm";
 import { getDb, type CloudflareDatabaseEnv } from "../src/db/client";
 import { alertEvents } from "../src/db/schema";
-import { GUARDRAILS } from "../src/lib/twin/types";
+import { GUARDRAILS, MARGIN_TIERS } from "../src/lib/twin/types";
 import type { ForecastHorizon, GuardrailViolation, ZoneView } from "../src/lib/twin/types";
 import { alertTransition } from "./alertLogic";
 
@@ -40,7 +40,7 @@ export function dashboardUrl(env: CloudflareDatabaseEnv, path = "/") {
 function worstForecast(z: ZoneView): { state: "red" | "amber" | "ok"; text?: string } {
   for (const h of HORIZONS) {
     const m = z.forecast[h].worstMargin;
-    if (m < 3) {
+    if (m < MARGIN_TIERS.yellow) {
       return {
         state: "red",
         text: `🔥 ${z.name} heat forecast — act now: peaks ${z.forecast[h].peakChipTempC.toFixed(0)}°C in ${h} (margin ${m.toFixed(1)}°C)`,
@@ -49,7 +49,7 @@ function worstForecast(z: ZoneView): { state: "red" | "amber" | "ok"; text?: str
   }
   for (const h of HORIZONS) {
     const m = z.forecast[h].worstMargin;
-    if (m >= 3 && m < 5) {
+    if (m >= MARGIN_TIERS.yellow && m < MARGIN_TIERS.green) {
       return {
         state: "amber",
         text: `☀️ ${z.name} heat rising — plan cooling: peak ${z.forecast[h].peakChipTempC.toFixed(0)}°C in ${h} (margin ${m.toFixed(1)}°C)`,

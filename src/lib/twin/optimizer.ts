@@ -1,5 +1,5 @@
 import { evaluateGuardrails, predict } from "./surrogate";
-import type { Setpoints, Telemetry, WhatIfCandidate } from "./types";
+import { MARGIN_TIERS, type Setpoints, type Telemetry, type WhatIfCandidate } from "./types";
 
 export interface WhatIfRequest {
   alpha: number;
@@ -7,6 +7,8 @@ export interface WhatIfRequest {
   baseSetpoints?: Setpoints;
   itLoadMw?: number;
   wetBulbC?: number;
+  /** Minimum thermal margin a candidate must keep (°C). */
+  minMarginC?: number;
 }
 
 export interface WhatIfResult {
@@ -26,10 +28,15 @@ const range = (lo: number, hi: number, step: number): number[] => {
  * Counterfactual grid search over setpoint permutations with hard guardrails.
  * Objective: minimize J = α·PUE + β·WUE (each term min-max normalized across
  * the feasible envelope so the weights stay comparable).
+ *
+ * Candidates must also keep an operating reserve below the chip limit (the
+ * green margin tier by default): passing the 85°C guardrail by a hair would
+ * still put the zone in the warning/critical band and trip alerts.
  */
 export function runWhatIf(request: WhatIfRequest): WhatIfResult {
   const alpha = Math.max(0, request.alpha);
   const beta = Math.max(0, request.beta);
+  const minMarginC = request.minMarginC ?? MARGIN_TIERS.green;
   const context: Pick<Telemetry, "itLoadMw" | "wetBulbC" | "dryBulbC"> = {
     itLoadMw: request.itLoadMw ?? 6.4,
     wetBulbC: request.wetBulbC ?? 18,
@@ -52,6 +59,13 @@ export function runWhatIf(request: WhatIfRequest): WhatIfResult {
         };
         const p = predict(context, setpoints);
         const g = evaluateGuardrails(p);
+        const violations = [...g.violations];
+        if (g.feasible && p.thermalMarginC < minMarginC) {
+          violations.push({
+            code: "THERMAL_MARGIN",
+            message: `Margin ${p.thermalMarginC.toFixed(1)}°C < ${minMarginC}°C operating reserve`,
+          });
+        }
         candidates.push({
           setpoints,
           pue: p.pue,
@@ -61,8 +75,8 @@ export function runWhatIf(request: WhatIfRequest): WhatIfResult {
           deltaPKpa: p.deltaPKpa,
           flowLpm: p.flowLpm,
           accessoryPowerMw: p.accessoryPowerMw,
-          feasible: g.feasible,
-          violations: g.violations,
+          feasible: violations.length === 0,
+          violations,
         });
       }
     }

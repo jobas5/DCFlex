@@ -1,6 +1,7 @@
 import {
   FACTORY_SETPOINTS,
   GUARDRAILS,
+  SLEW_LIMITS,
   type GuardrailResult,
   type GuardrailViolation,
   type Prediction,
@@ -61,7 +62,10 @@ export function predict(
 
   // --- Chiller power: linear in IT load, non-increasing in supply temp,
   //     non-decreasing in wet-bulb. Free-cooling fraction rises with supply. ---
-  const liftC = Math.max(0, supply - wetBulb - 2);
+  // Chiller lift ≈ condenser (wet-bulb + approach) − evaporator (supply): it
+  // grows with wet-bulb and shrinks with supply temp, keeping both monotonic
+  // guarantees. The 10°C approach keeps the factory point (16°C / 22°C) at lift 4.
+  const liftC = Math.max(0, wetBulb + 10 - supply);
   const freeCoolingShare = clamp((supply - 16) / 18, 0, 1);
   const wetBulbPenalty = 1 + Math.max(0, wetBulb - 14) * 0.022;
   const chillerPowerMw =
@@ -137,7 +141,7 @@ export function evaluateGuardrails(
 export function applySlewLimits(
   current: Setpoints,
   requested: Setpoints,
-  limits = { maxTempStepC: 3, maxPumpStepPct: 10, maxValveStepPct: 15 },
+  limits: { maxTempStepC: number; maxPumpStepPct: number; maxValveStepPct: number } = SLEW_LIMITS,
 ): { setpoints: Setpoints; limited: boolean } {
   let limited = false;
   const step = (cur: number, req: number, maxStep: number) => {

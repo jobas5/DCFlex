@@ -14,10 +14,31 @@ export interface Telemetry {
   dryBulbC: number;
 }
 
+/** Physical sensors on each zone's cooling loop (see sensors.ts for the catalog). */
+export type SensorKind =
+  | "gpu_die"
+  | "cpu_die"
+  | "cdu_supply"
+  | "cdu_return"
+  | "flow"
+  | "delta_p"
+  | "fws_supply"
+  | "fws_flow"
+  | "wet_bulb"
+  | "dry_bulb";
+
+export interface DataQualityEvent {
+  sensor: SensorKind;
+  kind: "outlier" | "drift" | "imputed";
+  note: string;
+}
+
 export interface DataQuality {
   outliersRemoved: number;
   driftFlags: string[];
   imputedCount: number;
+  /** Which sensor each data-quality action touched. */
+  events: DataQualityEvent[];
 }
 
 export interface Setpoints {
@@ -40,7 +61,8 @@ export interface Prediction {
 }
 
 export interface GuardrailViolation {
-  code: "CHIP_TEMP" | "DELTA_P_LOW" | "DELTA_P_HIGH" | "FLOW_LOW" | "FLOW_HIGH";
+  // THERMAL_MARGIN is the optimizer's operating reserve, not a hard guardrail.
+  code: "CHIP_TEMP" | "DELTA_P_LOW" | "DELTA_P_HIGH" | "FLOW_LOW" | "FLOW_HIGH" | "THERMAL_MARGIN";
   message: string;
 }
 

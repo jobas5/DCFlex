@@ -3,6 +3,7 @@ import {
   DEFAULT_ZONE_SPEC,
   FACTORY_SETPOINTS,
   type DataQuality,
+  type SensorKind,
   type Setpoints,
   type Telemetry,
   type ZoneSpec,
@@ -25,13 +26,19 @@ const round2 = (v: number) => Math.round(v * 100) / 100;
 
 const TICK_MS = 10 * 60 * 1000; // 10-minute intervals
 
+// Sensors whose dropped readings get imputed. Chosen by tick, not by the PRNG,
+// so recording which one was hit doesn't shift the rest of the random stream.
+const IMPUTABLE: SensorKind[] = ["flow", "delta_p", "cdu_return", "fws_flow", "dry_bulb"];
+
 export function tickTelemetry(
   prev: Telemetry | null,
   tickIndex: number,
   setpoints: Setpoints = FACTORY_SETPOINTS,
   spec: ZoneSpec = DEFAULT_ZONE_SPEC,
 ): { telemetry: Telemetry; quality: DataQuality } {
-  const rand = mulberry32(tickIndex * 7919 + 13);
+  // Salt by zone profile so zones don't share identical noise and sensor faults.
+  const salt = Math.round(spec.loadPhaseH * 1009 + spec.wetBulbOffsetC * 131 + spec.baseLoadMw * 17);
+  const rand = mulberry32(tickIndex * 7919 + 13 + salt);
   const noise = (amp: number) => (rand() - 0.5) * 2 * amp;
 
   // Time-of-day load cycle: business-hours peak, overnight trough.
@@ -60,18 +67,30 @@ export function tickTelemetry(
   let wetBulbOut = wetBulbC;
 
   // --- Data-quality layer simulation: occasional outlier + drift + gaps ---
-  const quality: DataQuality = { outliersRemoved: 0, driftFlags: [], imputedCount: 0 };
+  const quality: DataQuality = { outliersRemoved: 0, driftFlags: [], imputedCount: 0, events: [] };
   const anomalyRoll = rand();
   if (anomalyRoll < 0.04) {
     // Outlier injected then removed by validation layer.
     quality.outliersRemoved = 1;
-    cduSupply = round1(cduSupply + 6 * (rand() > 0.5 ? 1 : -1));
+    const spike = 6 * (rand() > 0.5 ? 1 : -1);
+    cduSupply = round1(cduSupply + spike);
     cduSupply = round1(supply); // outlier removed, value replaced by model estimate
+    quality.events.push({
+      sensor: "cdu_supply",
+      kind: "outlier",
+      note: `${spike > 0 ? "+" : "−"}6°C spike rejected; reading replaced by model estimate`,
+    });
   } else if (anomalyRoll < 0.08) {
     quality.driftFlags.push("wet_bulb: z-score 2.9 (recalibrated)");
     wetBulbOut = round1(wetBulbC * 0.7 + wetBase * 0.3);
+    quality.events.push({ sensor: "wet_bulb", kind: "drift", note: "Drift z-score 2.9; recalibrated against the model" });
   } else if (anomalyRoll < 0.11) {
     quality.imputedCount = 1;
+    quality.events.push({
+      sensor: IMPUTABLE[tickIndex % IMPUTABLE.length],
+      kind: "imputed",
+      note: "Reading missing; gap filled by model estimate",
+    });
   }
 
   return {

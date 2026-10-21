@@ -17,6 +17,14 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - uses: cloudflare/wrangler-action@v3
+        # wrangler-action reads each name under `secrets:` from the step's env.
+        env:
+          AUTH_USERNAME: ${{ secrets.AUTH_USERNAME }}
+          AUTH_PASSWORD_HASH: ${{ secrets.AUTH_PASSWORD_HASH }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DASHBOARD_URL: ${{ secrets.DASHBOARD_URL }}
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
