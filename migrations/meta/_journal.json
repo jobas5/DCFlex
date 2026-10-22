@@ -43,6 +43,13 @@
    "when": 1787274000000,
    "tag": "0005_alerts",
    "breakpoints": true
+  },
+  {
+   "idx": 6,
+   "version": "6",
+   "when": 1792656000000,
+   "tag": "0006_indexes",
+   "breakpoints": true
   }
  ]
 }
