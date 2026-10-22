@@ -77,7 +77,8 @@ seeds/local.sql     demo data (INSERT OR IGNORE / upserts)
 ## Database and migrations
 
 - Schema changes: edit `src/db/schema.ts`, then add a **new** migration in `migrations/` and a matching entry in `migrations/meta/_journal.json`. Never edit or renumber existing migrations.
-- **Gotcha:** `migrations/meta/` only has snapshots for 0000 and 0001; migrations 0002–0005 were written by hand. `npm run db:generate` will therefore diff against a stale snapshot and emit a migration that re-creates existing tables. Review its output carefully, or write the SQL by hand (follow the style of `0005_alerts.sql`).
+- **Gotcha:** `migrations/meta/` only has snapshots for 0000 and 0001; migrations 0002–0006 were written by hand. `npm run db:generate` will therefore diff against a stale snapshot and emit a migration that re-creates existing tables. Review its output carefully, or write the SQL by hand (follow the style of `0005_alerts.sql`).
+- **D1 bills rows scanned, not rows returned.** The UI polls every 5 s, so any new query on a polled or per-tick path needs an index (see `0006_indexes.sql`); check it with `EXPLAIN QUERY PLAN` (`SEARCH … USING INDEX`, not `SCAN`).
 - Keep `seeds/local.sql` re-runnable and update it if new tables or non-null columns need demo data.
 - Telemetry and shadow samples older than 1008 ticks are pruned each tick.
 

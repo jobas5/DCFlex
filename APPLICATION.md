@@ -337,6 +337,8 @@ Master data writes are validated server-side: targets positive (PUE ≥ 1), wate
 
 `src/db/schema.ts` (Drizzle) — tables: `zones`, `facility_config`, `telemetry_samples`, `shadow_samples`, `whatif_runs`, `whatif_candidates`, `control_actions`, `power_transfers`, `alert_events`, `model_metrics`. Migrations are append-only in `migrations/`; demo data in `seeds/local.sql` (re-runnable `INSERT OR IGNORE`).
 
+Indexes (`0006_indexes.sql`): `telemetry_samples (cluster_id, tick)` and `(tick)`, `shadow_samples (cluster_id)` and `(tick)`, `whatif_candidates (run_id)`. D1 bills rows scanned, and the UI polls every 5 s; without them each "latest sample for a zone" lookup scanned the full ~4,000-row retention window (~16,000 rows per `/api/telemetry/current` call). With them it reads one row per zone.
+
 ### 6.4 Secrets / environment
 
 `.dev.vars` (local) / `wrangler secret put` (prod):
