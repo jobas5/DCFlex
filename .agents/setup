@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Amp orb setup: prepare a fresh orb to build, test and run DCFlex.
+# Runs once per fresh orb (before snapshotting) and on stale snapshots.
+# Must be non-interactive, idempotent, and finish well under 20 minutes.
+set -euo pipefail
+
+log() { printf '[setup %s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
+step() { local t0=$SECONDS; log "> $*"; "$@"; log "< $* done in $((SECONDS - t0))s"; }
+
+cd "$(dirname "$0")/.."
+
+# --- Node 24 (CI pins node-version 24; the orb template may ship another major) ---
+pin_node() {
+  local major
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [[ "$major" == "24" ]]; then
+    log "node $(node -v) already pinned"
+    return
+  fi
+  local root="/usr/local/lib/nodejs"
+  local installed
+  installed="$(find "$root" -maxdepth 1 -type d -name 'node-v24.*' 2>/dev/null | sort | tail -1 || true)"
+  if [[ -z "$installed" ]]; then
+    log "installing Node 24 (template ships Node $major)"
+    mkdir -p "$root"
+    local name
+    name="$(curl -fsSL https://nodejs.org/dist/latest-v24.x/ | grep -Eo 'node-v24\.[0-9.]+-linux-x64\.tar\.xz' | head -1)"
+    curl -fsSL "https://nodejs.org/dist/latest-v24.x/$name" -o /tmp/node24.tar.xz
+    tar -xJf /tmp/node24.tar.xz -C "$root"
+    rm -f /tmp/node24.tar.xz
+    installed="$root/${name%.tar.xz}"
+  fi
+  ln -sfn "$installed/bin/node" /usr/local/bin/node
+  ln -sfn "$installed/bin/node" /usr/local/bin/nodejs
+  ln -sfn "$installed/bin/npm" /usr/local/bin/npm
+  ln -sfn "$installed/bin/npx" /usr/local/bin/npx
+  hash -r
+  log "pinned node $(node -v)"
+}
+
+step pin_node
+
+# --- Dependencies from the lockfile; skip when the restored snapshot already matches ---
+install_deps() {
+  local fingerprint
+  fingerprint="$(sha256sum package-lock.json | cut -d' ' -f1)"
+  if [[ -d node_modules && -f node_modules/.npm-ci-fingerprint &&
+        "$(cat node_modules/.npm-ci-fingerprint)" == "$fingerprint" ]]; then
+    log "node_modules matches package-lock.json, skipping npm ci"
+    return
+  fi
+  npm ci --no-audit --no-fund
+  echo "$fingerprint" > node_modules/.npm-ci-fingerprint
+}
+
+step install_deps
+
+# --- Local D1: schema + re-runnable demo seed (both idempotent) ---
+seed_d1() {
+  export CI=true WRANGLER_SEND_METRICS=false
+  npm run db:migrate:local
+  npm run db:seed:local
+}
+
+step seed_d1
+
+# --- .dev.vars: login fails closed without auth secrets; provision the documented dev login ---
+ensure_dev_vars() {
+  if [[ -f .dev.vars ]]; then
+    log ".dev.vars already present"
+    return
+  fi
+  local hash secret
+  hash="$(node -e 'const e=new TextEncoder();const H=x=>[...new Uint8Array(x)].map(b=>b.toString(16).padStart(2,"0")).join("");(async()=>{const s=crypto.getRandomValues(new Uint8Array(16));const k=await crypto.subtle.importKey("raw",e.encode("dcflex12"),"PBKDF2",false,["deriveBits"]);const d=await crypto.subtle.deriveBits({name:"PBKDF2",salt:s,iterations:100000,hash:"SHA-256"},k,256);console.log("pbkdf2:100000:"+H(s.buffer)+":"+H(d))})()')"
+  secret="$(node -e 'console.log([...crypto.getRandomValues(new Uint8Array(32))].map(b=>b.toString(16).padStart(2,"0")).join(""))')"
+  printf 'AUTH_USERNAME=admin\nAUTH_PASSWORD_HASH=%s\nAUTH_SECRET=%s\n' "$hash" "$secret" > .dev.vars
+  chmod 600 .dev.vars
+  log ".dev.vars provisioned with the documented dev login (admin / dcflex12)"
+}
+
+step ensure_dev_vars
+
+# --- Orb-specific agent guidance (lives outside the repo, survives snapshots) ---
+write_agent_note() {
+  local marker="# DCFlex orb notes"
+  if grep -Fqx "$marker" ~/.config/amp/AGENTS.md 2>/dev/null; then
+    return
+  fi
+  mkdir -p ~/.config/amp
+  cat >> ~/.config/amp/AGENTS.md <<EOF
+
+$marker
+- Local dev login is admin / dcflex12 (provisioned in .dev.vars by .agents/setup).
+- Start the app with \`amp orb services ensure\` (declared in .amp/services.yaml).
+EOF
+}
+
+step write_agent_note
+
+log "setup complete"
