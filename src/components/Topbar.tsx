@@ -53,7 +53,7 @@ export function Topbar() {
         : { tone: "ok" as const, text: "All nominal" };
 
   return (
-    <header className="sticky top-0 z-30 border-b border-line bg-canvas/80 backdrop-blur-xl">
+    <header className="sticky top-0 z-30 border-b border-line bg-canvas/60 backdrop-blur-2xl">
       <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4 sm:px-6">
         <Link to="/" className="flex items-center gap-2 md:hidden" aria-label="DCFlex home">
           <LogoMark className="h-7 w-7" />
@@ -102,8 +102,10 @@ export function Topbar() {
               aria-label={running ? "Pause simulation" : "Run simulation"}
               title={running ? "Pause simulation" : "Run simulation (advance a tick every 3s)"}
               className={cx(
-                "ml-2 inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-accent",
-                running ? "bg-accent text-on-accent" : "bg-surface-3 text-fg hover:bg-line-strong",
+                "ml-2 inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-all focus-visible:outline-2 focus-visible:outline-accent",
+                running
+                  ? "bg-gradient-to-b from-accent to-accent-strong text-on-accent shadow-[0_2px_12px_-2px_var(--accent)]"
+                  : "bg-surface-3 text-fg hover:bg-line-strong",
               )}
             >
               {running ? <Pause className="h-3 w-3" aria-hidden /> : <Play className="h-3 w-3" aria-hidden />}

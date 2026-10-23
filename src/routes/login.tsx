@@ -98,8 +98,13 @@ export function Login() {
       </div>
 
       {/* Form */}
-      <div className="flex items-center justify-center px-4 py-12">
-        <div className="w-full max-w-sm">
+      <div className="relative flex items-center justify-center px-4 py-12">
+        <div
+          className="pointer-events-none absolute inset-0"
+          aria-hidden
+          style={{ background: "radial-gradient(36rem 24rem at 50% 0%, var(--glow), transparent 70%)" }}
+        />
+        <div className="relative w-full max-w-sm rounded-3xl border border-line bg-surface/80 p-8 shadow-pop backdrop-blur-2xl">
           <div className="flex items-center gap-3 lg:hidden">
             <LogoMark className="h-9 w-9" />
             <div className="leading-tight">
@@ -107,7 +112,7 @@ export function Login() {
               <p className="text-xs text-fg-subtle">Cooling digital twin</p>
             </div>
           </div>
-          <h1 className="mt-8 text-2xl font-semibold tracking-tight text-fg lg:mt-0">Sign in</h1>
+          <h1 className="mt-6 text-2xl font-semibold tracking-tight text-fg lg:mt-0">Sign in</h1>
           <p className="mt-1.5 text-sm text-fg-subtle">Enter your operator credentials to continue.</p>
 
           <form onSubmit={submit} className="mt-8 space-y-4">

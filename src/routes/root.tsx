@@ -18,7 +18,7 @@ function Sidebar() {
   const { logout } = useAuth();
   const isActive = useActive();
   return (
-    <aside className="fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r border-line bg-surface/60 backdrop-blur-xl md:flex">
+    <aside className="fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r border-line bg-surface/70 backdrop-blur-2xl md:flex">
       <Link
         to="/"
         className="flex h-14 items-center gap-2.5 border-b border-line px-5 focus-visible:outline-2 focus-visible:outline-accent"
@@ -33,8 +33,8 @@ function Sidebar() {
       <nav aria-label="Primary" className="flex-1 space-y-6 overflow-y-auto px-3 py-5">
         {NAV_GROUPS.map((g) => (
           <div key={g.label}>
-            <p className="px-2.5 pb-1.5 text-[11px] font-medium uppercase tracking-[0.08em] text-fg-faint">{g.label}</p>
-            <ul className="space-y-0.5">
+            <p className="px-2.5 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-fg-faint">{g.label}</p>
+            <ul className="space-y-1">
               {g.items.map(({ to, label, icon: Icon }) => {
                 const active = isActive(to);
                 return (
@@ -43,12 +43,25 @@ function Sidebar() {
                       to={to}
                       aria-current={active ? "page" : undefined}
                       className={cx(
-                        "group relative flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-accent",
-                        active ? "bg-surface-2 text-fg ring-1 ring-inset ring-line" : "text-fg-subtle hover:bg-surface-2/60 hover:text-fg",
+                        "group relative flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-accent",
+                        active
+                          ? "bg-accent/10 text-accent"
+                          : "text-fg-subtle hover:bg-surface-2/70 hover:text-fg",
                       )}
                     >
-                      {active ? <span className="absolute inset-y-2 -left-3 w-0.5 rounded-full bg-accent" aria-hidden /> : null}
-                      <Icon className={cx("h-4 w-4 shrink-0", active ? "text-accent" : "text-fg-faint group-hover:text-fg-subtle")} aria-hidden />
+                      {active ? (
+                        <span
+                          className="absolute inset-y-1.5 -left-3 w-1 rounded-full bg-accent shadow-[0_0_10px_var(--accent)]"
+                          aria-hidden
+                        />
+                      ) : null}
+                      <Icon
+                        className={cx(
+                          "h-4 w-4 shrink-0 transition-colors",
+                          active ? "text-accent" : "text-fg-faint group-hover:text-fg-subtle",
+                        )}
+                        aria-hidden
+                      />
                       {label}
                     </Link>
                   </li>
@@ -60,14 +73,14 @@ function Sidebar() {
       </nav>
 
       <div className="space-y-3 border-t border-line p-3">
-        <div className="rounded-xl bg-surface-2 p-3 ring-1 ring-inset ring-line">
+        <div className="rounded-xl bg-gradient-to-b from-surface-2/80 to-surface-2/40 p-3 ring-1 ring-inset ring-line">
           <p className="text-xs font-medium text-fg">Simulated telemetry</p>
           <p className="mt-1 text-[11px] leading-relaxed text-fg-subtle">
             A seeded digital twin stands in for physical BMS/CDU hardware.
           </p>
         </div>
         <div className="flex items-center gap-2.5 px-1">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-xs font-semibold text-fg-muted ring-1 ring-inset ring-line">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-accent/25 to-violet/25 text-xs font-semibold text-fg ring-1 ring-inset ring-line">
             OP
           </span>
           <div className="min-w-0 flex-1 leading-tight">
@@ -140,7 +153,7 @@ function Layout() {
         aria-hidden
         style={{
           background:
-            "radial-gradient(60rem 30rem at 20% -10%, var(--glow), transparent 70%), radial-gradient(40rem 24rem at 100% 0%, var(--glow), transparent 70%)",
+            "radial-gradient(60rem 32rem at 15% -12%, var(--glow), transparent 70%), radial-gradient(44rem 26rem at 100% -5%, color-mix(in oklab, var(--violet) 40%, var(--glow)), transparent 70%), radial-gradient(30rem 20rem at 50% 110%, var(--glow), transparent 70%)",
         }}
       />
       <Sidebar />

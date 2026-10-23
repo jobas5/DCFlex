@@ -67,8 +67,10 @@ export function PageHeader({
   return (
     <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
       <div className="min-w-0">
-        {eyebrow ? <div className="mb-1.5 text-xs font-medium text-fg-subtle">{eyebrow}</div> : null}
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">{title}</h1>
+        {eyebrow ? (
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-accent">{eyebrow}</div>
+        ) : null}
+        <h1 className="text-[1.7rem] font-semibold leading-tight tracking-tight text-fg">{title}</h1>
         {description ? <p className="mt-1 max-w-2xl text-sm text-fg-subtle">{description}</p> : null}
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
@@ -107,7 +109,7 @@ export function Card({
         <header className="flex flex-wrap items-start justify-between gap-3 px-5 pt-4">
           <div className="flex min-w-0 items-start gap-2.5">
             {Icon ? (
-              <span className="mt-0.5 rounded-md bg-surface-2 p-1 text-fg-subtle ring-1 ring-inset ring-line">
+              <span className="mt-0.5 rounded-lg bg-accent/10 p-1.5 text-accent">
                 <Icon className="h-3.5 w-3.5" aria-hidden />
               </span>
             ) : null}
@@ -251,7 +253,10 @@ export function Meter({
       aria-valuenow={Math.round(value)}
       aria-label={label}
     >
-      <div className={cx("h-full rounded-full transition-[width] duration-500", TONE_BG[tone])} style={{ width: `${pct}%` }} />
+      <div
+        className={cx("h-full rounded-full transition-[width] duration-500", TONE_BG[tone], TONE_TEXT[tone])}
+        style={{ width: `${pct}%`, boxShadow: "0 0 10px -2px currentColor" }}
+      />
     </div>
   );
 }
@@ -329,15 +334,20 @@ export function KpiTile({
         className,
       )}
     >
+      {/* top sheen: catches the light like machined metal */}
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/40 to-transparent"
+        aria-hidden
+      />
       <div className="flex items-center justify-between gap-2">
         <p className="truncate text-xs font-medium text-fg-subtle">{label}</p>
         <IconChip icon={icon} tone={iconTone} size="sm" />
       </div>
-      <p className="mt-2 text-[1.65rem] font-semibold leading-none tracking-tight tabular-nums text-fg">
+      <p className="mt-2.5 text-3xl font-semibold leading-none tracking-tight tabular-nums text-fg">
         {value}
         {unit ? <span className="ml-1 text-sm font-medium text-fg-subtle">{unit}</span> : null}
       </p>
-      <div className="mt-1.5 min-h-4">{delta}</div>
+      <div className="mt-2 min-h-4">{delta}</div>
       {chart ? <div className="-mx-1 mt-2">{chart}</div> : null}
       {footer ? <div className="mt-auto pt-2 text-xs text-fg-faint">{footer}</div> : null}
     </div>
@@ -460,11 +470,11 @@ type ButtonSize = "sm" | "md" | "lg";
 
 const BUTTON_VARIANT: Record<ButtonVariant, string> = {
   primary:
-    "bg-accent text-on-accent shadow-[0_1px_0_0_rgb(255_255_255/0.25)_inset,0_6px_16px_-6px_var(--accent)] hover:bg-accent-strong",
+    "bg-gradient-to-b from-accent to-accent-strong text-on-accent shadow-[0_1px_0_0_rgb(255_255_255/0.25)_inset,0_6px_20px_-6px_var(--accent)] hover:brightness-110 active:brightness-95",
   secondary: "bg-surface-2 text-fg ring-1 ring-inset ring-line-strong hover:bg-surface-3",
   ghost: "text-fg-muted hover:bg-surface-2 hover:text-fg",
-  danger: "bg-crit text-white hover:brightness-110",
-  success: "bg-ok text-on-accent hover:brightness-110",
+  danger: "bg-crit text-white shadow-[0_6px_20px_-8px_var(--crit)] hover:brightness-110",
+  success: "bg-ok text-on-accent shadow-[0_6px_20px_-8px_var(--ok)] hover:brightness-110",
   outline: "text-accent ring-1 ring-inset ring-accent/40 hover:bg-accent/10",
 };
 
@@ -511,7 +521,7 @@ export function Segmented<T extends string | number>({
     <div
       role="radiogroup"
       aria-label={ariaLabel}
-      className={cx("inline-flex max-w-full overflow-x-auto rounded-lg bg-surface-2 p-0.5 ring-1 ring-inset ring-line", className)}
+      className={cx("inline-flex max-w-full overflow-x-auto rounded-full bg-surface-2 p-1 ring-1 ring-inset ring-line", className)}
     >
       {options.map((o) => {
         const active = o.value === value;
@@ -524,9 +534,11 @@ export function Segmented<T extends string | number>({
             disabled={o.disabled}
             onClick={() => onChange(o.value)}
             className={cx(
-              "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40",
-              size === "sm" ? "h-7 px-2.5 text-xs" : "h-8 px-3 text-sm",
-              active ? "bg-surface text-fg shadow-card ring-1 ring-inset ring-line-strong" : "text-fg-subtle hover:text-fg",
+              "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full font-medium transition-all focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40",
+              size === "sm" ? "h-7 px-3 text-xs" : "h-8 px-3.5 text-sm",
+              active
+                ? "bg-surface text-fg shadow-card ring-1 ring-inset ring-line-strong"
+                : "text-fg-subtle hover:text-fg",
             )}
           >
             {o.label}
