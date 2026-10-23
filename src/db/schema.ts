@@ -126,6 +126,33 @@ export const shadowSamples = sqliteTable(
   (t) => [index("shadow_samples_cluster_idx").on(t.clusterId), index("shadow_samples_tick_idx").on(t.tick)],
 );
 
+// Rolling validation counters over the shadow-sample retention window: the
+// polled validation endpoint reads this single row instead of up to 1008
+// shadow samples. Maintained on every shadow-sample insert/reset/prune;
+// rebuilt from the samples if the row is missing.
+export const shadowSummary = sqliteTable("shadow_summary", {
+  clusterId: int("cluster_id").primaryKey(),
+  tick: int("tick").notNull().default(0),
+  total: int("total").notNull().default(0),
+  feasible: int("feasible").notNull().default(0),
+  budgetOk: int("budget_ok").notNull().default(0),
+  meets: int("meets").notNull().default(0),
+  sumPueGap: real("sum_pue_gap").notNull().default(0),
+});
+
+// One load-weighted facility aggregate row per tick, written by the tick job
+// so the history endpoint reads `limit` rows instead of `limit × zones`.
+export const facilitySamples = sqliteTable("facility_samples", {
+  tick: int("tick").primaryKey(),
+  timestamp: text("timestamp").notNull(),
+  itLoadMw: real("it_load_mw").notNull(),
+  accessoryPowerMw: real("accessory_power_mw").notNull(),
+  pue: real("pue").notNull(),
+  wue: real("wue").notNull(),
+  gpuDieC: real("gpu_die_c").notNull(),
+  cpuDieC: real("cpu_die_c").notNull(),
+});
+
 export const alertEvents = sqliteTable("alert_events", {
   alertKey: text("alert_key").primaryKey(),
   state: text("state").notNull(),

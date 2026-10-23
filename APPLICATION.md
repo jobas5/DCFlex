@@ -244,7 +244,11 @@ for each zone:
   5. if shadow config: insert shadow_samples
 evaluateAlerts(views)              # Telegram: guardrails / fail-safe / margin / forecast
 heartbeat refresh (commsOk=1, failSafeActive=0)
-delete telemetry/shadow older than 1008 ticks
+insert facility_samples (one load-weighted facility aggregate row per tick)
+delete telemetry/shadow/facility samples older than 1008 ticks
+  (shadow_summary counters are decremented for the pruned shadow samples)
+prune audit tables: control_actions (last 500), whatif_runs+candidates (last 50
+  runs), power_transfers (last 200)
 return { aggregate, zones }
 ```
 
@@ -335,9 +339,11 @@ State providers (nest in `root.tsx`):
 
 Master data writes are validated server-side: targets positive (PUE ≥ 1), water budget ≥ 400 L/min, and Σ zone budgets ≤ facility budget (`PATCH /api/zones/{id}` and `PATCH /api/facility` return 400/404/422).
 
-`src/db/schema.ts` (Drizzle) — tables: `zones`, `facility_config`, `telemetry_samples`, `shadow_samples`, `whatif_runs`, `whatif_candidates`, `control_actions`, `power_transfers`, `alert_events`, `model_metrics`. Migrations are append-only in `migrations/`; demo data in `seeds/local.sql` (re-runnable `INSERT OR IGNORE`).
+`src/db/schema.ts` (Drizzle) — tables: `zones`, `facility_config`, `telemetry_samples`, `shadow_samples`, `shadow_summary`, `facility_samples`, `whatif_runs`, `whatif_candidates`, `control_actions`, `power_transfers`, `alert_events`, `model_metrics`. Migrations are append-only in `migrations/`; demo data in `seeds/local.sql` (re-runnable `INSERT OR IGNORE`).
 
 Indexes (`0006_indexes.sql`): `telemetry_samples (cluster_id, tick)` and `(tick)`, `shadow_samples (cluster_id)` and `(tick)`, `whatif_candidates (run_id)`. D1 bills rows scanned, and the UI polls every 5 s; without them each "latest sample for a zone" lookup scanned the full ~4,000-row retention window (~16,000 rows per `/api/telemetry/current` call). With them it reads one row per zone.
+
+Cost controls (`0007_summary_retention.sql`): `shadow_summary` keeps per-zone validation counters over the retention window so the polled validation endpoint reads 1 row instead of 1,008 samples (counters are maintained on insert/reset/prune and rebuilt if missing; the endpoint still returns the last 72 samples for the UI chart). `facility_samples` stores the load-weighted facility aggregate per tick so the history endpoint reads `limit` rows instead of `limit × zones` (falls back to aggregating `telemetry_samples` until 144 ticks have accumulated). `control_actions`, `whatif_runs`/`whatif_candidates` and `power_transfers` are pruned to their recent window each tick. Frontend polls pause on hidden tabs and run on tick-appropriate cadences (5 s telemetry, 15 s control, 30 s validation/history/sensors; the 5 s telemetry poll stands down while Run mode ticks every 3 s).
 
 ### 6.4 Secrets / environment
 

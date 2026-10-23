@@ -45,11 +45,18 @@
    "breakpoints": true
   },
   {
-   "idx": 6,
-   "version": "6",
-   "when": 1792656000000,
-   "tag": "0006_indexes",
-   "breakpoints": true
+      "idx": 6,
+      "version": "6",
+      "when": 1792656000000,
+      "tag": "0006_indexes",
+      "breakpoints": true
+  },
+  {
+      "idx": 7,
+      "version": "7",
+      "when": 1792809600000,
+      "tag": "0007_summary_retention",
+      "breakpoints": true
   }
- ]
+  ]
 }

@@ -18,6 +18,7 @@ import {
   type Tone,
 } from "../components/ui";
 import { api, type SensorsResponse } from "../lib/api";
+import { usePoll } from "../lib/poll";
 import { useSim } from "../lib/simContext";
 import { useTheme } from "../lib/theme";
 import { fmtTick } from "../lib/time";
@@ -187,19 +188,20 @@ function FacilityPage() {
   const [filter, setFilter] = useState<"all" | "issues">("all");
   const [resetKey, setResetKey] = useState(0);
 
-  const load = useCallback(async () => {
-    try {
-      setData(await api.sensors(36));
-    } catch {
-      /* keep last good data */
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    const id = setInterval(() => void load(), 5000);
-    return () => clearInterval(id);
-  }, [load]);
+  // 30s: sensor data changes once per simulation tick, and each poll reads
+  // window × zones telemetry payloads.
+  usePoll(
+    async (stale) => {
+      try {
+        const d = await api.sensors(36);
+        if (!stale()) setData(d);
+      } catch {
+        /* keep last good data */
+      }
+    },
+    30000,
+    [],
+  );
 
   const select = useCallback(
     (id: string | undefined) => navigate({ to: "/facility", search: { sensor: id }, replace: true }),

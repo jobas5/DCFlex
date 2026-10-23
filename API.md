@@ -129,7 +129,7 @@ Advance the simulation one tick. No body required.
 
 ### `GET /api/telemetry/history`
 
-Time-series history. Query params: `limit` (default `96`, max `200`), `clusterId` (optional; omit for facility aggregate).
+Time-series history. Query params: `limit` (default `96`, max `200`), `clusterId` (optional; omit for facility aggregate). The facility aggregate is served from precomputed `facility_samples` rows (one per tick) once 144 ticks have accumulated; before that it aggregates `telemetry_samples` directly.
 
 **Response**
 
@@ -253,7 +253,7 @@ Shadow-validation statistics for a zone.
 }
 ```
 
-`predicted*` is the shadow config's prediction, `actual*` the live config's. `meetsTarget` is one-sided: PUE ≤ target + 0.02 and WUE ≤ target + 0.02. `avgPueGap` averages only the amount above target. `ready` = shadow config set, ≥ `minSamples` samples, `feasibleRate` ≥ 0.95 and `meetsRate` ≥ 0.9.
+`predicted*` is the shadow config's prediction, `actual*` the live config's. `meetsTarget` is one-sided: PUE ≤ target + 0.02 and WUE ≤ target + 0.02. `avgPueGap` averages only the amount above target. `ready` = shadow config set, ≥ `minSamples` samples, `feasibleRate` ≥ 0.95 and `meetsRate` ≥ 0.9. The stats cover the full 1,008-tick retention window (served from the `shadow_summary` counters); `samples` is the most recent 72 (12 h) for the UI chart.
 
 ---
 

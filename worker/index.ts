@@ -1,11 +1,13 @@
-import { desc, eq, lt } from "drizzle-orm";
+import { desc, eq, lt, sql } from "drizzle-orm";
 import { getDb, type CloudflareDatabaseEnv } from "../src/db/client";
 import {
   controlActions,
   facilityConfig,
+  facilitySamples,
   modelMetrics,
   powerTransfers,
   shadowSamples,
+  shadowSummary,
   telemetrySamples,
   whatifCandidates,
   whatifRuns,
@@ -54,6 +56,7 @@ import {
 } from "../src/lib/twin/types";
 
 type Env = CloudflareDatabaseEnv;
+type Db = ReturnType<typeof getDb>;
 
 const WATCHDOG_TIMEOUT_SEC = 90;
 // Shadow validation needs at least one sim-hour of samples before it can pass.
@@ -400,27 +403,93 @@ function shadowSampleRow(
   };
 }
 
+type SummaryDelta = { feasible: number; budgetOk: number; meets: number; pueGap: number };
+
+function summaryDelta(row: typeof shadowSamples.$inferInsert, targetPue: number): SummaryDelta {
+  return {
+    feasible: row.feasible,
+    budgetOk: row.budgetOk,
+    meets: row.meetsTarget,
+    pueGap: Math.max(0, row.predictedPue - targetPue),
+  };
+}
+
+async function summaryAdd(db: Db, zoneId: number, tick: number, delta: SummaryDelta) {
+  await db
+    .insert(shadowSummary)
+    .values({ clusterId: zoneId, tick, total: 1, feasible: delta.feasible, budgetOk: delta.budgetOk, meets: delta.meets, sumPueGap: delta.pueGap })
+    .onConflictDoUpdate({
+      target: shadowSummary.clusterId,
+      set: {
+        tick,
+        total: sql`${shadowSummary.total} + 1`,
+        feasible: sql`${shadowSummary.feasible} + ${delta.feasible}`,
+        budgetOk: sql`${shadowSummary.budgetOk} + ${delta.budgetOk}`,
+        meets: sql`${shadowSummary.meets} + ${delta.meets}`,
+        sumPueGap: sql`${shadowSummary.sumPueGap} + ${delta.pueGap}`,
+      },
+    });
+}
+
+async function summarySubtractAll(db: Db, zoneId: number, deltas: SummaryDelta[]) {
+  if (!deltas.length) return;
+  const add = (a: keyof SummaryDelta) => deltas.reduce((s, d) => s + d[a], 0);
+  await db
+    .update(shadowSummary)
+    .set({
+      total: sql`max(0, ${shadowSummary.total} - ${deltas.length})`,
+      feasible: sql`max(0, ${shadowSummary.feasible} - ${add("feasible")})`,
+      budgetOk: sql`max(0, ${shadowSummary.budgetOk} - ${add("budgetOk")})`,
+      meets: sql`max(0, ${shadowSummary.meets} - ${add("meets")})`,
+      sumPueGap: sql`max(0, ${shadowSummary.sumPueGap} - ${add("pueGap")})`,
+    })
+    .where(eq(shadowSummary.clusterId, zoneId));
+}
+
 async function validationStats(env: Env, zone: ZoneRow) {
-  const rows = await getDb(env)
-    .select()
-    .from(shadowSamples)
-    .where(eq(shadowSamples.clusterId, zone.id))
-    .orderBy(desc(shadowSamples.id))
-    .limit(1008);
-  const total = rows.length;
-  const feasible = rows.filter((r) => r.feasible === 1).length;
-  const budgetOk = rows.filter((r) => r.budgetOk === 1).length;
-  const meets = rows.filter((r) => r.meetsTarget === 1).length;
-  const avgPueGap = total
-    ? rows.reduce((s, r) => s + Math.max(0, r.predictedPue - zone.targetPue), 0) / total
-    : 0;
+  const db = getDb(env);
+  // D1 bills rows scanned, and this endpoint is polled every few seconds: the
+  // per-zone summary row carries the retention-window counters so a poll reads
+  // one row instead of up to 1008 samples. Rebuild if the row went missing
+  // (e.g. samples seeded without a summary).
+  let summary = (await db.select().from(shadowSummary).where(eq(shadowSummary.clusterId, zone.id)))[0];
+  if (!summary) {
+    const samples = await db
+      .select()
+      .from(shadowSamples)
+      .where(eq(shadowSamples.clusterId, zone.id))
+      .orderBy(desc(shadowSamples.id))
+      .limit(1008);
+    const counters = samples.reduce(
+      (acc, r) => {
+        acc.total += 1;
+        acc.feasible += r.feasible;
+        acc.budgetOk += r.budgetOk;
+        acc.meets += r.meetsTarget;
+        acc.sumPueGap += Math.max(0, r.predictedPue - zone.targetPue);
+        return acc;
+      },
+      { total: 0, feasible: 0, budgetOk: 0, meets: 0, sumPueGap: 0 },
+    );
+    summary = { clusterId: zone.id, tick: 0, ...counters };
+    await db.insert(shadowSummary).values(summary).onConflictDoNothing();
+  }
+  const { total, feasible, budgetOk, meets, sumPueGap } = summary;
   const feasibleRate = total ? feasible / total : 0;
   const meetsRate = total ? meets / total : 0;
+  const avgPueGap = total ? sumPueGap / total : 0;
   const ready =
     zone.shadowSetpoints != null &&
     total >= MIN_VALIDATION_SAMPLES &&
     feasibleRate >= VALIDATION_FEASIBLE_RATE &&
     meetsRate >= VALIDATION_MEETS_RATE;
+  // Recent samples only for the UI chart/table — the stats come from the summary.
+  const rows = await db
+    .select()
+    .from(shadowSamples)
+    .where(eq(shadowSamples.clusterId, zone.id))
+    .orderBy(desc(shadowSamples.id))
+    .limit(72);
   return { rows, total, feasible, budgetOk, meets, feasibleRate, meetsRate, avgPueGap, ready };
 }
 
@@ -447,9 +516,9 @@ async function advanceSimulation(env: Env) {
       wue: prediction.wue,
     });
     if (z.shadowSetpoints) {
-      await db
-        .insert(shadowSamples)
-        .values(shadowSampleRow(z, telemetry, parseSetpoints(z.shadowSetpoints), nextTick, steered));
+      const sample = shadowSampleRow(z, telemetry, parseSetpoints(z.shadowSetpoints), nextTick, steered);
+      await db.insert(shadowSamples).values(sample);
+      await summaryAdd(db, z.id, nextTick, summaryDelta(sample, z.targetPue));
     }
     views.push(buildZoneView(z, telemetry, steered));
   }
@@ -459,14 +528,44 @@ async function advanceSimulation(env: Env) {
     .update(zones)
     .set({ lastHeartbeat: nowIso, commsOk: 1, failSafeActive: 0 })
     .where(eq(zones.id, zones.id));
-  await db
-    .delete(telemetrySamples)
-    .where(lt(telemetrySamples.tick, nextTick - 1008));
-  await db
-    .delete(shadowSamples)
-    .where(lt(shadowSamples.tick, nextTick - 1008));
   const facility = await getFacility(env);
-  return { aggregate: buildFacility(views, facility), zones: views };
+  const aggregate = buildFacility(views, facility);
+  // Precomputed facility history: one row per tick instead of re-aggregating
+  // `limit × zones` telemetry rows on every polled history request.
+  await db.insert(facilitySamples).values({
+    tick: nextTick,
+    timestamp: views[0]?.telemetry.timestamp ?? nowIso,
+    itLoadMw: aggregate.itLoadMw,
+    accessoryPowerMw: aggregate.accessoryPowerMw,
+    pue: aggregate.pue,
+    wue: aggregate.wue,
+    gpuDieC: Math.max(...views.map((v) => v.telemetry.gpuDieC)),
+    cpuDieC: Math.max(...views.map((v) => v.telemetry.cpuDieC)),
+  });
+  const cutoff = nextTick - 1008;
+  await db.delete(telemetrySamples).where(lt(telemetrySamples.tick, cutoff));
+  await db.delete(facilitySamples).where(lt(facilitySamples.tick, cutoff));
+  // Keep the summary counters in sync with the pruned shadow samples.
+  const pruned = await db
+    .select({ clusterId: shadowSamples.clusterId, sample: shadowSamples })
+    .from(shadowSamples)
+    .where(lt(shadowSamples.tick, cutoff));
+  if (pruned.length) {
+    const byZone = new Map<number, SummaryDelta[]>();
+    for (const p of pruned) {
+      const zone = allZones.find((z) => z.id === p.clusterId);
+      if (!zone) continue;
+      byZone.set(p.clusterId, [...(byZone.get(p.clusterId) ?? []), summaryDelta(p.sample, zone.targetPue)]);
+    }
+    for (const [zoneId, deltas] of byZone) await summarySubtractAll(db, zoneId, deltas);
+    await db.delete(shadowSamples).where(lt(shadowSamples.tick, cutoff));
+  }
+  // Audit/action tables grow forever otherwise; keep recent history only.
+  await db.run(sql`DELETE FROM control_actions WHERE id <= (SELECT MAX(id) - 500 FROM control_actions)`);
+  await db.run(sql`DELETE FROM whatif_candidates WHERE run_id <= (SELECT MAX(id) - 50 FROM whatif_runs)`);
+  await db.run(sql`DELETE FROM whatif_runs WHERE id <= (SELECT MAX(id) - 50 FROM whatif_runs)`);
+  await db.run(sql`DELETE FROM power_transfers WHERE id <= (SELECT MAX(id) - 200 FROM power_transfers)`);
+  return { aggregate, zones: views };
 }
 
 async function handleApi(request: Request, env: Env): Promise<Response> {
@@ -560,6 +659,27 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         }),
       });
     }
+    // Fast path: the tick job writes one load-weighted facility row per tick,
+    // so a poll reads `limit` rows instead of `limit × zones` telemetry rows.
+    const precomputed = await db
+      .select()
+      .from(facilitySamples)
+      .orderBy(desc(facilitySamples.tick))
+      .limit(limit);
+    if (precomputed.length >= limit) {
+      return json({
+        history: precomputed.reverse().map((r) => ({
+          tick: r.tick,
+          timestamp: r.timestamp,
+          pue: r.pue,
+          wue: r.wue,
+          gpuDieC: r.gpuDieC,
+          cpuDieC: r.cpuDieC,
+          itLoadMw: r.itLoadMw,
+          accessoryPowerMw: r.accessoryPowerMw,
+        })),
+      });
+    }
     // Facility aggregate: load-weighted PUE/WUE, worst die temps per tick.
     const zoneCount = (await listZones(env)).length || 1;
     const rows = await db
@@ -642,17 +762,19 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
     const runId = inserted[0].id;
 
     const top = result.candidates.slice(0, 25);
-    for (const c of top) {
-      await db.insert(whatifCandidates).values({
-        runId,
-        setpoints: JSON.stringify(c.setpoints),
-        pue: c.pue,
-        wue: c.wue,
-        cost: c.feasible ? c.cost : null,
-        chipTempC: c.chipTempC,
-        feasible: c.feasible ? 1 : 0,
-        violations: JSON.stringify(c.violations),
-      });
+    if (top.length) {
+      await db.insert(whatifCandidates).values(
+        top.map((c) => ({
+          runId,
+          setpoints: JSON.stringify(c.setpoints),
+          pue: c.pue,
+          wue: c.wue,
+          cost: c.feasible ? c.cost : null,
+          chipTempC: c.chipTempC,
+          feasible: c.feasible ? 1 : 0,
+          violations: JSON.stringify(c.violations),
+        })),
+      );
     }
 
     return json({
@@ -849,9 +971,26 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
       .update(zones)
       .set({ shadowSetpoints: JSON.stringify(body.setpoints), updatedAt: new Date().toISOString() })
       .where(eq(zones.id, zone.id));
-    // Fresh validation run: clear old samples and log an immediate sample + action.
+    // Fresh validation run: clear old samples (and their summary counters) and
+    // log an immediate sample + action.
     await db.delete(shadowSamples).where(eq(shadowSamples.clusterId, zone.id));
-    await db.insert(shadowSamples).values(shadowSampleRow(zone, telemetry, body.setpoints, telemetry.tick));
+    const sample = shadowSampleRow(zone, telemetry, body.setpoints, telemetry.tick);
+    await db.insert(shadowSamples).values(sample);
+    const delta = summaryDelta(sample, zone.targetPue);
+    await db
+      .insert(shadowSummary)
+      .values({ clusterId: zone.id, tick: telemetry.tick, total: 1, feasible: delta.feasible, budgetOk: delta.budgetOk, meets: delta.meets, sumPueGap: delta.pueGap })
+      .onConflictDoUpdate({
+        target: shadowSummary.clusterId,
+        set: {
+          tick: telemetry.tick,
+          total: 1,
+          feasible: delta.feasible,
+          budgetOk: delta.budgetOk,
+          meets: delta.meets,
+          sumPueGap: delta.pueGap,
+        },
+      });
     await db.insert(controlActions).values({
       clusterId: zone.id,
       mode: zone.mode,

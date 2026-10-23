@@ -8,6 +8,7 @@ import {
 } from "react";
 import { api, type TelemetryCurrentResponse } from "./api";
 import { useAuth } from "./auth";
+import { usePoll } from "./poll";
 
 interface SimContextValue {
   data: TelemetryCurrentResponse | null;
@@ -37,20 +38,27 @@ export function SimProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Poll only while signed in: polling the login screen would just 401 every 5s.
+  // While Run mode is active the tick interval below refreshes the same payload
+  // every 3s, so the cheaper 5s poll stands down.
   useEffect(() => {
     if (!authed) {
       setData(null);
       setRunning(false);
-      return;
     }
-    void refresh();
-    const id = setInterval(() => void refresh(), 5000);
-    return () => clearInterval(id);
-  }, [authed, refresh]);
+  }, [authed]);
 
-  useEffect(() => {
-    if (!running || !authed) return;
-    const id = setInterval(async () => {
+  usePoll(
+    async () => {
+      if (!authed || running) return;
+      await refresh();
+    },
+    5000,
+    [authed, refresh, running],
+  );
+
+  usePoll(
+    async () => {
+      if (!authed || !running) return;
       try {
         const d = await api.telemetryTick();
         setData(d);
@@ -58,9 +66,10 @@ export function SimProvider({ children }: { children: ReactNode }) {
       } catch {
         /* ignore */
       }
-    }, 3000);
-    return () => clearInterval(id);
-  }, [running, authed]);
+    },
+    3000,
+    [authed, running],
+  );
 
   const toggle = useCallback(() => setRunning((v) => !v), []);
 

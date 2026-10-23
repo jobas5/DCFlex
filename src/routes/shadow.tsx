@@ -37,6 +37,7 @@ import {
   TONE_TEXT,
 } from "../components/ui";
 import { api, type ControlResponse, type ControlZoneView, type ValidationResponse } from "../lib/api";
+import { usePoll } from "../lib/poll";
 import { useSim } from "../lib/simContext";
 import { fmtDateTime, fmtTick } from "../lib/time";
 import { CHART } from "../lib/tokens";
@@ -47,20 +48,23 @@ const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 function useValidation(zoneId: number) {
   const [data, setData] = useState<ValidationResponse | null>(null);
-  const load = useCallback(async () => {
-    try {
-      setData(await api.getValidation(zoneId));
-    } catch {
-      /* keep last good data */
-    }
-  }, [zoneId]);
-  useEffect(() => {
-    setData(null);
-    void load();
-    const id = setInterval(() => void load(), 5000);
-    return () => clearInterval(id);
-  }, [load]);
-  return { data, reload: load };
+  const [nonce, setNonce] = useState(0);
+  // 30s: the stats only change once per simulation tick, and D1 bills the scan.
+  usePoll(
+    async (stale) => {
+      try {
+        const d = await api.getValidation(zoneId);
+        if (!stale()) setData(d);
+      } catch {
+        /* keep last good data */
+      }
+    },
+    30000,
+    [zoneId, nonce],
+  );
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
+  useEffect(() => setData(null), [zoneId]);
+  return { data, reload };
 }
 
 /* ------------------------------------------------------------------ */
@@ -589,21 +593,24 @@ function ShadowPage() {
   const navigate = useNavigate();
   const { zone: zoneId } = useSearch({ from: "/shadow" });
   const [control, setControl] = useState<ControlResponse | null>(null);
+  const [controlNonce, setControlNonce] = useState(0);
   const { data: validation, reload: reloadValidation } = useValidation(zoneId);
 
-  const refresh = useCallback(async () => {
-    try {
-      setControl(await api.getControl());
-    } catch {
-      /* keep last good data */
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    const id = setInterval(() => void refresh(), 5000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  // 15s: heartbeat ages and watchdog state move on their own cadence, slower
+  // than the live telemetry, and each poll reads the last 50 control actions.
+  usePoll(
+    async (stale) => {
+      try {
+        const d = await api.getControl();
+        if (!stale()) setControl(d);
+      } catch {
+        /* keep last good data */
+      }
+    },
+    15000,
+    [controlNonce],
+  );
+  const reloadControl = useCallback(() => setControlNonce((n) => n + 1), []);
 
   const zone = control?.zones.find((z) => z.id === zoneId);
   const hasConfig = zone?.shadowSetpoints != null;
@@ -667,7 +674,7 @@ function ShadowPage() {
               <SetpointControl
                 zone={zone}
                 onApplied={() => {
-                  void refresh();
+                  reloadControl();
                   void reloadValidation();
                 }}
               />

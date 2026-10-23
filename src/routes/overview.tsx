@@ -32,6 +32,7 @@ import {
   type Tone,
 } from "../components/ui";
 import { api, type HistoryPoint } from "../lib/api";
+import { usePoll } from "../lib/poll";
 import { useSim } from "../lib/simContext";
 import { fmtTime } from "../lib/time";
 import { CHART } from "../lib/tokens";
@@ -59,25 +60,22 @@ const modeLabel = (mode: string) => (mode === "closed_loop" ? "Closed-loop" : "S
 
 function useHistory(clusterId: number | undefined, limit: number, enabled = true) {
   const [history, setHistory] = useState<HistoryPoint[] | null>(null);
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    const load = async () => {
+  // 30s: history changes once per simulation tick; polling faster just re-reads
+  // `limit × zones` rows the D1 bill pays for.
+  usePoll(
+    async (stale) => {
+      if (!enabled) return;
       try {
         const res = await api.telemetryHistory(clusterId, limit);
-        if (!cancelled) setHistory(res.history);
+        if (!stale()) setHistory(res.history);
       } catch {
         /* keep last good data */
       }
-    };
-    setHistory(null);
-    void load();
-    const id = setInterval(() => void load(), 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [clusterId, limit, enabled]);
+    },
+    30000,
+    [clusterId, limit, enabled],
+  );
+  useEffect(() => setHistory(null), [clusterId, limit, enabled]);
   return history;
 }
 
